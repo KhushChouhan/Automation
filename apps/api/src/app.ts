@@ -274,6 +274,38 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     reply.header('x-content-type-options', 'nosniff');
   });
 
+  app.get('/', async (_request, reply) => {
+    reply.type('text/html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Reels Automation Engine</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .card { background: #1e293b; padding: 2rem 2.5rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 480px; width: 100%; text-align: center; border: 1px solid #334155; }
+    .status { display: inline-block; background: #10b981; color: #022c22; font-weight: bold; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.875rem; margin-bottom: 1rem; }
+    h1 { margin: 0.5rem 0 1rem; font-size: 1.5rem; }
+    p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1.5rem; }
+    .links { display: flex; gap: 0.75rem; justify-content: center; }
+    .links a { background: #3b82f6; color: white; text-decoration: none; padding: 0.5rem 1rem; border-radius: 6px; font-size: 0.875rem; font-weight: 500; }
+    .links a.secondary { background: #334155; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="status">&#9679; System Live</div>
+    <h1>Instagram Reels Automation</h1>
+    <p>Unified Engine (Fastify API, Automation Worker &amp; Queue) is running successfully on Render.</p>
+    <div class="links">
+      <a href="/health">Health Check</a>
+      <a href="/readiness">Readiness Status</a>
+      <a href="/api/v1/dashboard" class="secondary">API JSON</a>
+    </div>
+  </div>
+</body>
+</html>`);
+  });
+
   app.get('/health', async (_request, reply) => {
     reply.header('cache-control', 'no-store');
     return { status: 'ok', service: 'api' };
