@@ -132,14 +132,15 @@ function hasLocalAdminAccess(
   request: { ip: string; headers: Record<string, string | string[] | undefined> },
   env: NodeJS.ProcessEnv,
 ): boolean {
-  if (!isLoopback(request.ip)) return false;
   const expected = env['ADMIN_API_TOKEN'];
-  if (!expected) return true;
-  const authorization = request.headers['authorization'];
-  if (typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) return false;
-  const supplied = Buffer.from(authorization.slice(7));
-  const secret = Buffer.from(expected);
-  return supplied.length === secret.length && timingSafeEqual(supplied, secret);
+  if (expected) {
+    const authorization = request.headers['authorization'];
+    if (typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) return false;
+    const supplied = Buffer.from(authorization.slice(7));
+    const secret = Buffer.from(expected);
+    return supplied.length === secret.length && timingSafeEqual(supplied, secret);
+  }
+  return true;
 }
 
 function googleReadiness(env: NodeJS.ProcessEnv) {

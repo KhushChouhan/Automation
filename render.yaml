@@ -63,3 +63,24 @@ services:
         sync: false
       - key: INSTAGRAM_PUBLISHING_ENABLED
         sync: false
+      # Google Drive & Sheets Integration
+      - key: GOOGLE_AUTH_TYPE
+        value: oauth
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        value: 1WjCyyb2F85K4fOkmznzRb1LRS_D9a6cXKtCOJzEcib0
+      - key: GOOGLE_VIDEO_FOLDER_ID
+        value: 1nOFmkDTEaUJhle1him3qUviFmmjQ2sr4
+      - key: GOOGLE_THUMBNAIL_FOLDER_ID
+        value: 1xBdlVwrppfo86dfCDr0ntf4eR6jEF4eW
+      - key: GOOGLE_ARCHIVE_FOLDER_ID
+        value: 1IfK_Hmrd3_xpxQbug5rU8cU6NiNQcJvR
+      - key: GOOGLE_DRIVE_ARCHIVE_ENABLED
+        value: "false"
+      - key: GOOGLE_SYNC_INTERVAL_MINUTES
+        value: "5"
