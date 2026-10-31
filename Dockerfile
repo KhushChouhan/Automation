@@ -46,3 +46,16 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/admin ./apps/admin
 EXPOSE 3000
 CMD ["pnpm", "--filter", "@gcs/admin", "start"]
+
+# Target: Unified Free Service (Fastify API + Background Worker in 1 Free Container)
+FROM base AS unified
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/package.json /app/pnpm-workspace.yaml ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages ./packages
+COPY --from=builder /app/apps/api ./apps/api
+COPY --from=builder /app/apps/worker ./apps/worker
+EXPOSE 8000
+CMD ["node", "-e", "import('./apps/api/dist/main.js'); import('./apps/worker/dist/main.js');"]
+

@@ -2,18 +2,18 @@ databases:
   - name: reels-postgres
     databaseName: reels_automation
     user: postgres
-    plan: standard
+    plan: free
     ipAllowList: []
 
 services:
-  # Fastify REST API Service
+  # 100% Free Unified Web Service (Fastify API + Background Automation Worker in 1 Container)
   - type: web
-    name: reels-api
+    name: reels-automation
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    dockerfileTarget: api
-    plan: standard
+    dockerfileTarget: unified
+    plan: free
     region: oregon
     healthCheckPath: /health
     envVars:
@@ -25,56 +25,42 @@ services:
         fromDatabase:
           name: reels-postgres
           property: connectionString
+      # Enter free Redis URL (e.g. from free https://upstash.com)
       - key: REDIS_URL
-        fromService:
-          type: redis
-          name: reels-redis
-          property: connectionString
-
-  # Automation Background Worker
-  - type: worker
-    name: reels-worker
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    dockerfileTarget: worker
-    plan: standard
-    region: oregon
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: reels-postgres
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: reels-redis
-          property: connectionString
-
-  # Next.js Admin Dashboard
-  - type: web
-    name: reels-admin
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    dockerfileTarget: admin
-    plan: standard
-    region: oregon
-    envVars:
-      - key: PORT
-        value: 3000
-      - key: NODE_ENV
-        value: production
-      - key: NEXT_PUBLIC_API_URL
-        fromService:
-          type: web
-          name: reels-api
-          property: host
-
-  # Managed Redis
-  - type: redis
-    name: reels-redis
-    plan: standard
-    ipAllowList: []
+        sync: false
+      - key: APP_TIMEZONE
+        value: Asia/Kolkata
+      - key: DAILY_REEL_LIMIT
+        value: 2
+      - key: SAME_FACE_GAP_DAYS
+        value: 2
+      - key: SLOT_1
+        value: 19:00
+      - key: SLOT_2
+        value: 20:00
+      - key: AUTOMATION_ENABLED
+        sync: false
+      - key: CONTENT_GENERATOR_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-1.5-flash
+      - key: MEDIA_STORAGE_PROVIDER
+        value: cloudinary
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: META_AUTH_PATH
+        value: facebook_login
+      - key: META_PAGE_ACCESS_TOKEN
+        sync: false
+      - key: META_PAGE_ID
+        sync: false
+      - key: INSTAGRAM_ACCOUNT_ID
+        sync: false
+      - key: INSTAGRAM_PUBLISHING_ENABLED
+        sync: false
