@@ -5,7 +5,7 @@ WORKDIR /app
 
 # Dependencies stage
 FROM base AS dependencies
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY prisma ./prisma/
 COPY packages ./packages/
 COPY apps ./apps/
@@ -56,6 +56,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/apps/api ./apps/api
 COPY --from=builder /app/apps/worker ./apps/worker
+COPY --from=builder /app/prisma ./prisma
 EXPOSE 8000
-CMD ["node", "-e", "import('./apps/api/dist/main.js'); import('./apps/worker/dist/main.js');"]
+CMD ["sh", "-c", "pnpm db:migrate && node -e \"import('./apps/api/dist/main.js'); import('./apps/worker/dist/main.js');\""]
 
