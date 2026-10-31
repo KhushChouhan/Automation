@@ -1,0 +1,30 @@
+{
+  "name": "@gcs/integrations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "google:oauth": "tsx src/google-oauth-bootstrap.ts",
+    "google:bootstrap": "tsx src/google-workspace-bootstrap.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1157.0",
+    "@aws-sdk/s3-request-presigner": "^3.1157.0",
+    "@gcs/core": "workspace:*",
+    "cloudinary": "^2.11.0",
+    "googleapis": "^188.0.0",
+    "openai": "^7.45.0",
+    "zod": "^4.6.7"
+  }
+}

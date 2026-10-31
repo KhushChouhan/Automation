@@ -1,0 +1,11 @@
+{
+  "name": "@reels/testing",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./fixtures": "./src/fixtures.ts",
+    "./fakes": "./src/fakes.ts"
+  }
+}

@@ -1,0 +1,351 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkflowStatus {
+  WAITING_VIDEO
+  WAITING_FACE
+  WAITING_TITLE
+  WAITING_THUMBNAIL
+  WAITING_APPROVAL
+  READY
+  SELECTED
+  CONTENT_GENERATING
+  CONTENT_READY
+  SCHEDULED
+  PUBLISHING
+  POSTED
+  FAILED
+  RECONCILE_REQUIRED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CHANGES_REQUIRED
+}
+
+enum ScheduleStatus {
+  SELECTED
+  SCHEDULED
+  PUBLISHING
+  RECONCILE_REQUIRED
+  POSTED
+  FAILED
+  CANCELLED
+}
+
+enum PublishAttemptStatus {
+  CLAIMED
+  CONTAINER_CREATED
+  PROCESSING
+  PUBLISH_REQUESTED
+  RECONCILE_REQUIRED
+  SUCCEEDED
+  FAILED
+}
+
+enum FailureClass {
+  TRANSIENT
+  RATE_LIMIT
+  AUTH
+  VALIDATION
+  PERMANENT
+  UNKNOWN
+  MANUAL_ACTION_REQUIRED
+}
+
+enum OutboxStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+enum MediaPreparationStatus {
+  PREPARING
+  READY
+  FAILED
+  CLEANED
+}
+
+model IdCounter {
+  name  String @id
+  value BigInt @default(0)
+}
+
+model Face {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  videos    Video[]
+  schedules Schedule[]
+  posts     PostingHistory[]
+}
+
+model Video {
+  id                   String          @id @default(cuid())
+  videoId              String          @unique
+  driveFileId          String?         @unique
+  sourceName           String?
+  sourceMimeType       String?
+  sourceChecksum       String?
+  sourceSizeBytes      BigInt?
+  sourceCreatedTime    DateTime?       @db.Timestamptz(3)
+  sourceModifiedTime   DateTime?       @db.Timestamptz(3)
+  title                String?
+  faceId               String?
+  face                 Face?           @relation(fields: [faceId], references: [id], onDelete: Restrict)
+  workflowStatus       WorkflowStatus  @default(WAITING_VIDEO)
+  approvalStatus       ApprovalStatus  @default(PENDING)
+  readyAt              DateTime?       @db.Timestamptz(3)
+  inputVersion         Int             @default(1)
+  manualActionRequired Boolean         @default(false)
+  manualActionReason   String?
+  createdAt            DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime        @updatedAt @db.Timestamptz(3)
+  thumbnail            Thumbnail?
+  content              Content[]
+  approvals            ApprovalEvent[]
+  schedule             Schedule?
+  publishAttempts      PublishAttempt[]
+  postingHistory       PostingHistory?
+  sheetSyncStates      SheetRowSync[]
+  syncConflicts        SyncConflict[]
+  mediaAssets          MediaAsset[]
+
+  @@index([workflowStatus, readyAt, videoId])
+  @@index([faceId])
+}
+
+model Thumbnail {
+  id             String   @id @default(cuid())
+  videoId        String   @unique
+  video          Video    @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  driveFileId    String?  @unique
+  storageKey     String?
+  checksum       String?
+  mimeType       String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model UnmatchedThumbnail {
+  id            String   @id @default(cuid())
+  driveFileId   String   @unique
+  sourceName    String
+  checksum      String?
+  mimeType      String?
+  candidateId   String?
+  reason        String
+  firstSeenAt   DateTime @default(now()) @db.Timestamptz(3)
+  lastSeenAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([candidateId])
+}
+
+model SheetRowSync {
+  id                   String   @id @default(cuid())
+  spreadsheetId        String
+  videoId              String
+  video                Video    @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  rowVersion           String?
+  lastSyncedHuman      Json
+  lastImportedHash     String?
+  lastMirroredHash     String?
+  lastMirroredVersion  String?
+  updatedAt            DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([spreadsheetId, videoId])
+}
+
+model SyncConflict {
+  id             String   @id @default(cuid())
+  source         String
+  sourceKey      String
+  videoId        String?
+  video          Video?   @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  field          String
+  reason         String
+  fingerprint    String   @unique
+  databaseValue  Json?
+  incomingValue  Json?
+  resolvedAt     DateTime? @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([source, sourceKey, resolvedAt])
+  @@index([videoId, resolvedAt])
+}
+
+model Content {
+  id            String   @id @default(cuid())
+  videoId       String
+  video         Video    @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  version       Int
+  titleSnapshot String
+  caption       String
+  hashtags      String[]
+  cta           String
+  provider      String   @default("unknown")
+  modelName     String
+  promptVersion String
+  generationKey String   @unique
+  usage         Json?
+  regenerated   Boolean  @default(false)
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([videoId, version])
+}
+
+model ApprovalEvent {
+  id         String         @id @default(cuid())
+  videoId    String
+  video      Video          @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  decision   ApprovalStatus
+  actorId    String
+  reason     String?
+  createdAt  DateTime       @default(now()) @db.Timestamptz(3)
+
+  @@index([videoId, createdAt])
+}
+
+model Schedule {
+  id             String         @id @default(cuid())
+  videoId        String         @unique
+  video          Video          @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  faceId         String
+  face           Face           @relation(fields: [faceId], references: [id], onDelete: Restrict)
+  businessDate   String         @db.VarChar(10)
+  slotHour       Int
+  scheduledAt    DateTime       @unique @db.Timestamptz(3)
+  status         ScheduleStatus @default(SELECTED)
+  jobId          String         @unique
+  createdAt      DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime       @updatedAt @db.Timestamptz(3)
+  publishAttempts PublishAttempt[]
+  mediaAsset      MediaAsset?
+
+  @@unique([businessDate, slotHour])
+  @@unique([businessDate, faceId])
+  @@index([faceId, businessDate])
+}
+
+model MediaAsset {
+  id                 String                 @id @default(cuid())
+  videoId            String
+  video              Video                  @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  scheduleId         String                 @unique
+  schedule           Schedule               @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  provider           String
+  bucket             String?
+  videoObjectKey     String                 @unique
+  thumbnailObjectKey String?
+  contentType        String
+  sizeBytes          BigInt
+  checksum           String?
+  status             MediaPreparationStatus @default(PREPARING)
+  expiresAt          DateTime?              @db.Timestamptz(3)
+  preparedAt         DateTime?              @db.Timestamptz(3)
+  cleanedAt          DateTime?              @db.Timestamptz(3)
+  lastError          String?
+  createdAt          DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime               @updatedAt @db.Timestamptz(3)
+
+  @@index([status, expiresAt])
+  @@index([videoId])
+}
+
+model PublishAttempt {
+  id             String               @id @default(cuid())
+  videoId        String
+  video          Video                @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  scheduleId     String
+  schedule       Schedule             @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  idempotencyKey String               @unique
+  status         PublishAttemptStatus @default(CLAIMED)
+  containerId    String?              @unique
+  mediaId        String?              @unique
+  failureClass   FailureClass?
+  errorCode      String?
+  leaseToken     String?
+  leaseExpiresAt DateTime?            @db.Timestamptz(3)
+  containerRequestedAt DateTime?      @db.Timestamptz(3)
+  publishRequestedAt DateTime?        @db.Timestamptz(3)
+  reconcileRequiredAt DateTime?       @db.Timestamptz(3)
+  lastReconciledAt DateTime?          @db.Timestamptz(3)
+  createdAt      DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime             @updatedAt @db.Timestamptz(3)
+
+  @@index([videoId, status])
+  @@index([scheduleId])
+}
+
+model PostingHistory {
+  id             String   @id @default(cuid())
+  videoId        String   @unique
+  video          Video    @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  faceId         String
+  face           Face     @relation(fields: [faceId], references: [id], onDelete: Restrict)
+  instagramMediaId String @unique
+  permalink      String?
+  businessDate   String   @db.VarChar(10)
+  postedAt       DateTime @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([businessDate, faceId])
+  @@index([faceId, businessDate])
+}
+
+model OutboxEvent {
+  id           String       @id @default(cuid())
+  eventKey     String       @unique
+  eventType    String
+  payload      Json
+  status       OutboxStatus @default(PENDING)
+  attempts     Int          @default(0)
+  availableAt  DateTime     @default(now()) @db.Timestamptz(3)
+  deliveredAt  DateTime?    @db.Timestamptz(3)
+  lastError    String?
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime     @updatedAt @db.Timestamptz(3)
+
+  @@index([status, availableAt])
+}
+
+model AutomationSetting {
+  key       String   @id
+  value     Json
+  version   Int      @default(1)
+  actorId   String
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String
+  action    String
+  entity    String
+  entityId  String
+  before    Json?
+  after     Json?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([entity, entityId, createdAt])
+}
+
+model SyncCursor {
+  id         String   @id @default(cuid())
+  source     String
+  accountKey String
+  cursor     String
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([source, accountKey])
+}

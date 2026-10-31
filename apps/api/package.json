@@ -1,0 +1,27 @@
+{
+  "name": "@gcs/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=../../.env --env-file-if-exists=../../.env.local --import tsx --watch src/main.ts",
+    "start": "node --env-file=../../.env --env-file-if-exists=../../.env.local dist/main.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/helmet": "^13.0.1",
+    "@gcs/config": "workspace:*",
+    "@gcs/database": "workspace:*",
+    "@gcs/integrations": "workspace:*",
+    "bullmq": "^5.41.9",
+    "fastify": "^5.6.2",
+    "ioredis": "^5.4.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.4"
+  }
+}

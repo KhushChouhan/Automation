@@ -1,0 +1,80 @@
+databases:
+  - name: reels-postgres
+    databaseName: reels_automation
+    user: postgres
+    plan: standard
+    ipAllowList: []
+
+services:
+  # Fastify REST API Service
+  - type: web
+    name: reels-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerfileTarget: api
+    plan: standard
+    region: oregon
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reels-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: reels-redis
+          property: connectionString
+
+  # Automation Background Worker
+  - type: worker
+    name: reels-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerfileTarget: worker
+    plan: standard
+    region: oregon
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reels-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: reels-redis
+          property: connectionString
+
+  # Next.js Admin Dashboard
+  - type: web
+    name: reels-admin
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerfileTarget: admin
+    plan: standard
+    region: oregon
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          type: web
+          name: reels-api
+          property: host
+
+  # Managed Redis
+  - type: redis
+    name: reels-redis
+    plan: standard
+    ipAllowList: []
