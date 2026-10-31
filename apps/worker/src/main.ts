@@ -21,9 +21,18 @@ import { createInstagramPublishProcessors } from './instagram-publish.js';
 const config = loadConfig();
 const logger = createLogger({ level: config.logLevel });
 const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+redis.on('error', (err) => {
+  logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Redis connection warning');
+});
 const db = createDatabaseClient();
 const queues = Object.fromEntries(
-  Object.values(QUEUE_NAMES).map((name) => [name, new Queue(name, { connection: redis })]),
+  Object.values(QUEUE_NAMES).map((name) => {
+    const queue = new Queue(name, { connection: redis });
+    queue.on('error', (err) => {
+      logger.warn({ queue: name, err: err instanceof Error ? err.message : String(err) }, 'Queue connection warning');
+    });
+    return [name, queue];
+  }),
 ) as Record<QueueName, Queue>;
 const syncQueue = queues[QUEUE_NAMES.syncGoogle];
 const googleReady =
