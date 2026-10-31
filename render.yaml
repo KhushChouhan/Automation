@@ -12,7 +12,6 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    dockerfileTarget: unified
     plan: free
     region: oregon
     healthCheckPath: /health
