@@ -60,7 +60,10 @@ const envSchema = z.object({
   SAME_FACE_GAP_DAYS: z.coerce.number().int().nonnegative().default(2),
   SLOT_1: z.string().regex(timePattern, 'Expected HH:mm').default('19:00'),
   SLOT_2: z.string().regex(timePattern, 'Expected HH:mm').default('20:00'),
-  REDIS_URL: z.string().url().default('redis://127.0.0.1:6379'),
+  REDIS_URL: z.preprocess(
+    (value) => (typeof value === 'string' && !value.trim() ? undefined : value),
+    z.string().url().default('redis://127.0.0.1:6379'),
+  ),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   GOOGLE_AUTH_TYPE: z.enum(['oauth', 'service_account']).default('oauth'),

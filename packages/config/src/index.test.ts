@@ -91,6 +91,11 @@ describe('configuration defaults', () => {
     expect(() => loadConfig({ META_PAGE_ID: 'not-a-numeric-id' })).toThrow();
   });
 
+  it('defaults blank or whitespace REDIS_URL to local redis', () => {
+    expect(loadConfig({ REDIS_URL: '' }).redisUrl).toBe('redis://127.0.0.1:6379');
+    expect(loadConfig({ REDIS_URL: '   ' }).redisUrl).toBe('redis://127.0.0.1:6379');
+  });
+
   it('retains the Instagram Login configuration path', () => {
     expect(
       loadConfig({

@@ -10,9 +10,16 @@ process.on('unhandledRejection', (reason) => {
   console.error('[PROD unhandledRejection]:', reason);
 });
 
-// 1. Embedded Redis startup if localhost/default
-const redisUrl = process.env['REDIS_URL'] || 'redis://127.0.0.1:6379';
-if (redisUrl.includes('127.0.0.1') || redisUrl.includes('localhost')) {
+// 1. Embedded Redis startup if localhost, empty, or default
+const rawRedisUrl = (process.env['REDIS_URL'] ?? '').trim();
+const isLocalRedis =
+  !rawRedisUrl ||
+  rawRedisUrl.includes('127.0.0.1') ||
+  rawRedisUrl.includes('localhost') ||
+  rawRedisUrl === 'redis://127.0.0.1:6379';
+
+if (isLocalRedis) {
+  process.env['REDIS_URL'] = 'redis://127.0.0.1:6379';
   console.log('[PROD] Launching embedded Redis server for queue processing...');
   try {
     const redisProc = spawn('redis-server', ['--daemonize', 'yes', '--protected-mode', 'no', '--port', '6379'], {
