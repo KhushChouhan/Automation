@@ -2,28 +2,30 @@ import { spawn } from 'node:child_process';
 
 console.log('[PROD] Starting Instagram Reels Automation (Unified Engine)...');
 
-// 1. Run Prisma database migrations if DATABASE_URL is set
+// 1. Sync PostgreSQL database schema using Prisma db push
 if (process.env['DATABASE_URL']) {
-  console.log('[PROD] Checking database and executing pending migrations...');
+  console.log('[PROD] Connecting to PostgreSQL and synchronizing database schema...');
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
       await new Promise((resolve, reject) => {
         const proc = spawn(
           'node',
-          ['node_modules/prisma/build/index.js', 'migrate', 'deploy', '--schema', 'prisma/schema.prisma'],
+          ['node_modules/prisma/build/index.js', 'db', 'push', '--schema', 'prisma/schema.prisma', '--skip-generate'],
           { stdio: 'inherit' },
         );
         proc.on('close', (code) => {
           if (code === 0) resolve(undefined);
-          else reject(new Error(`Migration exited with code ${code}`));
+          else reject(new Error(`Prisma schema sync exited with code ${code}`));
         });
       });
-      console.log('[PROD] Database schema is up to date.');
+      console.log('[PROD] Database schema synchronized successfully.');
       break;
     } catch (err) {
-      console.warn(`[PROD] Migration attempt ${attempt}/5: ${err instanceof Error ? err.message : String(err)}. Retrying in 2s...`);
+      console.warn(
+        `[PROD] Schema sync attempt ${attempt}/5: ${err instanceof Error ? err.message : String(err)}. Retrying in 2s...`,
+      );
       if (attempt === 5) {
-        console.error('[PROD] Database migration could not complete. Continuing service launch...');
+        console.error('[PROD] Database schema sync could not complete. Continuing service launch...');
       } else {
         await new Promise((r) => setTimeout(r, 2000));
       }
