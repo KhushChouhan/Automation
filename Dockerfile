@@ -57,6 +57,7 @@ COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/apps/api ./apps/api
 COPY --from=builder /app/apps/worker ./apps/worker
 COPY --from=builder /app/prisma ./prisma
+COPY scripts ./scripts
 EXPOSE 8000
-CMD ["sh", "-c", "pnpm db:migrate && node -e \"import('./apps/api/dist/main.js'); import('./apps/worker/dist/main.js');\""]
+CMD ["node", "scripts/start.mjs"]
 
