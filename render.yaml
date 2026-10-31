@@ -1,7 +1,7 @@
 databases:
   - name: reels-postgres
     databaseName: reels_automation
-    user: postgres
+    user: reels_user
     plan: free
     ipAllowList: []
 
