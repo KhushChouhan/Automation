@@ -614,6 +614,20 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     };
   });
 
+    app.get('/api/v1/videos/:id/audit', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
+    const video = await db.video.findUnique({ where: { videoId: id }, select: { id: true } });
+    if (!video) return reply.code(404).send({ error: 'Video not found' });
+    const logs = await db.auditLog.findMany({
+      where: { entity: 'Video', entityId: video.id },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    reply.header('cache-control', 'no-store');
+    return { videoId: id, logs };
+  });
+
   async function enqueueVideoOperation(
     request: {
       ip: string;

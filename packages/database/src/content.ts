@@ -27,7 +27,7 @@ export async function beginContentGeneration(db: PrismaClient, input: ContentCla
     if (!video.title || !video.faceId || video.approvalStatus !== 'APPROVED')
       throw new Error('Content generation requires approved title, face and video');
     if (
-      !['READY', 'SELECTED', 'CONTENT_GENERATING', 'CONTENT_READY', 'SCHEDULED'].includes(
+      !['READY', 'SELECTED', 'CONTENT_GENERATING', 'CONTENT_READY', 'SCHEDULED', 'FAILED'].includes(
         video.workflowStatus,
       )
     )
@@ -188,9 +188,11 @@ export async function recordContentGenerationFailure(
       ? video.schedule?.status === 'SCHEDULED'
         ? 'SCHEDULED'
         : 'CONTENT_READY'
-      : input.retryable
-        ? 'SELECTED'
-        : 'FAILED';
+      : video.schedule
+        ? input.retryable
+          ? 'SELECTED'
+          : 'FAILED'
+        : 'READY';
     await tx.video.update({
       where: { id: video.id },
       data: { workflowStatus: recoveryStatus },

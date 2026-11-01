@@ -50,14 +50,13 @@ type GeminiResponse = {
 };
 
 const responseSchema = {
-  type: 'object',
+  type: 'OBJECT',
   properties: {
-    caption: { type: 'string' },
-    hashtags: { type: 'array', items: { type: 'string' } },
-    cta: { type: 'string' },
+    caption: { type: 'STRING' },
+    hashtags: { type: 'ARRAY', items: { type: 'STRING' } },
+    cta: { type: 'STRING' },
   },
   required: ['caption', 'hashtags', 'cta'],
-  additionalProperties: false,
 } as const;
 
 function retryAfterSeconds(value: string | null): number | undefined {
@@ -173,7 +172,7 @@ export class GeminiContentGenerator implements ContentGenerator {
               ],
               generationConfig: {
                 responseMimeType: 'application/json',
-                responseJsonSchema: responseSchema,
+                responseSchema,
                 temperature: 0.4,
               },
             }),
@@ -197,7 +196,13 @@ export class GeminiContentGenerator implements ContentGenerator {
           );
         let normalized;
         try {
-          normalized = normalizeGeneratedContent(JSON.parse(text));
+          const rawCleaned = text
+            .trim()
+            .replace(/^```json\s*/i, '')
+            .replace(/^```\s*/i, '')
+            .replace(/```\s*$/i, '')
+            .trim();
+          normalized = normalizeGeneratedContent(JSON.parse(rawCleaned));
         } catch {
           throw new GeminiGenerationError(
             'INVALID_RESPONSE',
