@@ -143,123 +143,141 @@ export class GeminiContentGenerator implements ContentGenerator {
     const maxAttempts = this.options.maxAttempts ?? 3;
     const rawModel = input.model?.replace(/^models\//, '').trim();
     const candidateModels = [
-      rawModel,
-      'gemini-2.0-flash',
       'gemini-2.5-flash',
-      'gemini-2.0-flash-exp',
-      'gemini-1.5-flash-latest',
-      'gemini-1.5-flash-8b',
-      'gemini-1.5-flash',
+      'gemini-flash-latest',
+      'gemini-2.5-flash-lite',
+      'gemini-3.6-flash',
+      'gemini-3.7-flash',
+      rawModel,
     ].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
 
     let lastError: GeminiGenerationError | null = null;
     for (const activeModel of candidateModels) {
       const cleanModel = activeModel.replace(/^models\//, '').trim();
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        try {
-          const response = await (this.options.fetch ?? fetch)(
-            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cleanModel)}:generateContent`,
-            {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', 'x-goog-api-key': this.apiKey },
-              signal: AbortSignal.timeout(this.options.timeoutMs ?? 30_000),
-              body: JSON.stringify({
-                systemInstruction: { parts: [{ text: input.systemPrompt }] },
-                contents: [
-                  {
-                    role: 'user',
-                    parts: [
-                      {
-                        text: [
-                          `Video ID: ${input.videoId}`,
-                          `Approved manual title: ${input.title}`,
-                          input.faceId ? `Face ID: ${input.faceId}` : '',
-                          `Approval: ${input.approvalStatus}`,
-                          'Return only the required structured caption, hashtags, and CTA. Do not alter the title.',
-                        ]
-                          .filter(Boolean)
-                          .join('\n'),
-                      },
-                    ],
-                  },
-                ],
-                generationConfig: {
-                  responseMimeType: 'application/json',
-                  responseSchema,
-                  temperature: 0.4,
-                },
-              }),
-            },
-          );
-          const body = (await response.json()) as GeminiResponse;
-          if (!response.ok) throw classifyResponse(response, body);
-          if (body.promptFeedback?.blockReason || body.candidates?.[0]?.finishReason === 'SAFETY')
-            throw new GeminiGenerationError(
-              'SAFETY_BLOCK',
-              'Gemini safety policy blocked generation',
-              false,
-            );
-          const text =
-            body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
-          if (!text)
-            throw new GeminiGenerationError(
-              'INVALID_RESPONSE',
-              'Gemini returned no structured content',
-              false,
-            );
-          let normalized;
+      for (const useSchema of [true, false]) {
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           try {
-            const rawCleaned = text
-              .trim()
-              .replace(/^```json\s*/i, '')
-              .replace(/^```\s*/i, '')
-              .replace(/```\s*$/i, '')
-              .trim();
-            normalized = normalizeGeneratedContent(JSON.parse(rawCleaned));
-          } catch {
-            throw new GeminiGenerationError(
-              'INVALID_RESPONSE',
-              'Gemini returned invalid structured content',
-              false,
+            const response = await (this.options.fetch ?? fetch)(
+              `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cleanModel)}:generateContent`,
+              {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-goog-api-key': this.apiKey },
+                signal: AbortSignal.timeout(this.options.timeoutMs ?? 30_000),
+                body: JSON.stringify({
+                  systemInstruction: { parts: [{ text: input.systemPrompt }] },
+                  contents: [
+                    {
+                      role: 'user',
+                      parts: [
+                        {
+                          text: [
+                            `Video ID: ${input.videoId}`,
+                            `Approved manual title: ${input.title}`,
+                            input.faceId ? `Face ID: ${input.faceId}` : '',
+                            `Approval: ${input.approvalStatus}`,
+                            'Return only valid JSON with keys: caption (string), hashtags (array of strings), and cta (string). Do not alter the title.',
+                          ]
+                            .filter(Boolean)
+                            .join('\n'),
+                        },
+                      ],
+                    },
+                  ],
+                  generationConfig: {
+                    responseMimeType: 'application/json',
+                    ...(useSchema ? { responseSchema } : {}),
+                    temperature: 0.4,
+                  },
+                }),
+              },
             );
+            const body = (await response.json()) as GeminiResponse;
+            if (!response.ok) {
+              if (response.status === 400 && useSchema) {
+                // If responseSchema was rejected, fall back to pure JSON mode
+                break;
+              }
+              throw classifyResponse(response, body);
+            }
+            if (body.promptFeedback?.blockReason || body.candidates?.[0]?.finishReason === 'SAFETY')
+              throw new GeminiGenerationError(
+                'SAFETY_BLOCK',
+                'Gemini safety policy blocked generation',
+                false,
+              );
+            const candidateParts = (body.candidates?.[0]?.content?.parts ?? []) as Array<{
+              text?: string;
+              thought?: boolean;
+            }>;
+            const nonThought = candidateParts.filter((p) => !p.thought && Boolean(p.text));
+            const partsToUse = nonThought.length > 0 ? nonThought : candidateParts;
+            const text = partsToUse.map((part) => part.text ?? '').join('');
+            if (!text)
+              throw new GeminiGenerationError(
+                'INVALID_RESPONSE',
+                'Gemini returned no structured content',
+                false,
+              );
+            let normalized;
+            try {
+              const rawCleaned = text
+                .trim()
+                .replace(/^```json\s*/i, '')
+                .replace(/^```\s*/i, '')
+                .replace(/```\s*$/i, '')
+                .trim();
+              const firstBrace = rawCleaned.indexOf('{');
+              const lastBrace = rawCleaned.lastIndexOf('}');
+              const jsonText =
+                firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace
+                  ? rawCleaned.slice(firstBrace, lastBrace + 1)
+                  : rawCleaned;
+              normalized = normalizeGeneratedContent(JSON.parse(jsonText));
+            } catch {
+              throw new GeminiGenerationError(
+                'INVALID_RESPONSE',
+                'Gemini returned invalid structured content',
+                false,
+              );
+            }
+            const usage = {
+              ...(body.usageMetadata?.promptTokenCount !== undefined
+                ? { inputTokens: body.usageMetadata.promptTokenCount }
+                : {}),
+              ...(body.usageMetadata?.candidatesTokenCount !== undefined
+                ? { outputTokens: body.usageMetadata.candidatesTokenCount }
+                : {}),
+              ...(body.usageMetadata?.totalTokenCount !== undefined
+                ? { totalTokens: body.usageMetadata.totalTokenCount }
+                : {}),
+            };
+            return {
+              ...normalized,
+              model: cleanModel,
+              ...(Object.keys(usage).length ? { usage } : {}),
+            };
+          } catch (error) {
+            if (
+              error instanceof GeminiGenerationError &&
+              (error.code === 'MODEL_UNAVAILABLE' || error.code === 'VALIDATION') &&
+              candidateModels.indexOf(activeModel) < candidateModels.length - 1
+            ) {
+              lastError = error;
+              break; // Try next candidate model
+            }
+            lastError =
+              error instanceof GeminiGenerationError
+                ? error
+                : error instanceof DOMException && error.name === 'TimeoutError'
+                  ? new GeminiGenerationError('TIMEOUT', 'Gemini request timed out', true)
+                  : new GeminiGenerationError('NETWORK', 'Gemini network request failed', true);
+            if (!lastError.retryable || attempt === maxAttempts) throw lastError;
+            const base = Math.max(500, (lastError.details.retryAfterSeconds ?? 0) * 1_000);
+            const jitter = 0.75 + (this.options.random ?? Math.random)() * 0.5;
+            await (
+              this.options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+            )(Math.round(base * 2 ** (attempt - 1) * jitter));
           }
-          const usage = {
-            ...(body.usageMetadata?.promptTokenCount !== undefined
-              ? { inputTokens: body.usageMetadata.promptTokenCount }
-              : {}),
-            ...(body.usageMetadata?.candidatesTokenCount !== undefined
-              ? { outputTokens: body.usageMetadata.candidatesTokenCount }
-              : {}),
-            ...(body.usageMetadata?.totalTokenCount !== undefined
-              ? { totalTokens: body.usageMetadata.totalTokenCount }
-              : {}),
-          };
-          return {
-            ...normalized,
-            model: cleanModel,
-            ...(Object.keys(usage).length ? { usage } : {}),
-          };
-        } catch (error) {
-          if (
-            error instanceof GeminiGenerationError &&
-            (error.code === 'MODEL_UNAVAILABLE' || error.code === 'VALIDATION') &&
-            candidateModels.indexOf(activeModel) < candidateModels.length - 1
-          ) {
-            lastError = error;
-            break; // Try next candidate model
-          }
-          lastError =
-            error instanceof GeminiGenerationError
-              ? error
-              : error instanceof DOMException && error.name === 'TimeoutError'
-                ? new GeminiGenerationError('TIMEOUT', 'Gemini request timed out', true)
-                : new GeminiGenerationError('NETWORK', 'Gemini network request failed', true);
-          if (!lastError.retryable || attempt === maxAttempts) throw lastError;
-          const base = Math.max(500, (lastError.details.retryAfterSeconds ?? 0) * 1_000);
-          const jitter = 0.75 + (this.options.random ?? Math.random)() * 0.5;
-          await (
-            this.options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
-          )(Math.round(base * 2 ** (attempt - 1) * jitter));
         }
       }
     }

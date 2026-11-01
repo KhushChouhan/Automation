@@ -505,6 +505,47 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     }
   });
 
+  app.get('/api/v1/integrations/gemini/test', async (request, reply) => {
+    const apiKey = env['GEMINI_API_KEY'];
+    if (!apiKey) return reply.code(400).send({ error: 'GEMINI_API_KEY is not configured' });
+    const modelsToTry = [
+      'gemini-2.5-flash',
+      'gemini-flash-latest',
+      'gemini-2.5-flash-lite',
+      'gemini-3.6-flash',
+    ];
+    const results: Record<string, unknown> = {};
+    for (const model of modelsToTry) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+            body: JSON.stringify({
+              contents: [
+                {
+                  role: 'user',
+                  parts: [{ text: 'Return valid JSON with caption, hashtags (array of strings), and cta.' }],
+                },
+              ],
+              generationConfig: {
+                responseMimeType: 'application/json',
+                temperature: 0.4,
+              },
+            }),
+          },
+        );
+        const data = await res.json();
+        results[model] = { status: res.status, ok: res.ok, data };
+      } catch (err) {
+        results[model] = { error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+    reply.header('cache-control', 'no-store');
+    return results;
+  });
+
   app.get('/api/v1/integrations/meta/status', async (request, reply) => {
     if (!hasLocalAdminAccess(request, env))
       return reply.code(403).send({ error: 'Local admin access required' });
