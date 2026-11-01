@@ -177,12 +177,15 @@ export async function assignFaceInTransaction(
   });
   if (before.schedule || before.workflowStatus === 'POSTED')
     throw new Error('A selected or posted video face cannot be changed');
-  const face = await tx.face.findUniqueOrThrow({ where: { id: faceId } });
+  const face =
+    (await tx.face.findUnique({ where: { id: faceId } })) ??
+    (await tx.face.findUnique({ where: { name: faceId } })) ??
+    (await tx.face.create({ data: { name: faceId, active: true } }));
   if (!face.active) throw new Error('Inactive face cannot be assigned');
-  if (before.faceId === faceId) return before;
+  if (before.faceId === face.id) return before;
   const workflowStatus = deriveWorkflowStatus({
     hasVideo: Boolean(before.driveFileId),
-    faceId,
+    faceId: face.id,
     title: before.title,
     hasThumbnail: Boolean(before.thumbnail),
     approvalStatus: 'PENDING',
@@ -190,12 +193,13 @@ export async function assignFaceInTransaction(
   const after = await tx.video.update({
     where: { id: before.id },
     data: {
-      faceId,
+      faceId: face.id,
       approvalStatus: 'PENDING',
       workflowStatus,
       readyAt: null,
       inputVersion: { increment: 1 },
     },
+    include: { face: true, thumbnail: true, schedule: true },
   });
   await tx.auditLog.create({
     data: {

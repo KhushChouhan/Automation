@@ -1,4 +1,10 @@
-import { createDatabaseClient, type PrismaClient } from '@gcs/database';
+import {
+  createDatabaseClient,
+  decideApproval,
+  assignFace,
+  setVideoTitle,
+  type PrismaClient,
+} from '@gcs/database';
 import { loadConfig } from '@gcs/config';
 import { getGoogleAuthStatus, MetaGraphInstagramPublisher } from '@gcs/integrations';
 import { timingSafeEqual } from 'node:crypto';
@@ -685,6 +691,57 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
   app.post('/api/v1/videos/:id/media/retry', (request, reply) =>
     enqueueVideoOperation(request, reply, 'retry-media'),
   );
+
+  app.post('/api/v1/videos/:id/approve', async (request, reply) => {
+    if (!hasLocalAdminAccess(request, env))
+      return reply.code(403).send({ error: 'Local admin access required' });
+    const { id } = request.params as { id: string };
+    if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
+    try {
+      const updated = await decideApproval(db, id, {
+        decision: 'APPROVED',
+        actorId: 'admin-dashboard',
+      });
+      reply.header('cache-control', 'no-store');
+      return { approved: true, video: updated };
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/v1/videos/:id/face', async (request, reply) => {
+    if (!hasLocalAdminAccess(request, env))
+      return reply.code(403).send({ error: 'Local admin access required' });
+    const { id } = request.params as { id: string };
+    if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
+    const body = (request.body as { faceName?: string } | undefined) ?? {};
+    const faceName = (body.faceName ?? '').trim();
+    if (!faceName) return reply.code(400).send({ error: 'faceName is required' });
+    try {
+      const updated = await assignFace(db, id, faceName, 'admin-dashboard');
+      reply.header('cache-control', 'no-store');
+      return { success: true, video: updated };
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/v1/videos/:id/title', async (request, reply) => {
+    if (!hasLocalAdminAccess(request, env))
+      return reply.code(403).send({ error: 'Local admin access required' });
+    const { id } = request.params as { id: string };
+    if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
+    const body = (request.body as { title?: string } | undefined) ?? {};
+    const title = (body.title ?? '').trim();
+    if (!title) return reply.code(400).send({ error: 'title is required' });
+    try {
+      const updated = await setVideoTitle(db, id, title, 'admin-dashboard');
+      reply.header('cache-control', 'no-store');
+      return { success: true, video: updated };
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 
   app.post('/api/v1/sync/google', async (request, reply) => {
     if (!hasLocalAdminAccess(request, env))

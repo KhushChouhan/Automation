@@ -87,7 +87,7 @@ export async function selectReadyBacklog(db: PrismaClient, options: SelectReadyB
           SELECT v."id", v."videoId", v."faceId", v."readyAt"
           FROM "Video" AS v
           JOIN "Face" AS f ON f."id" = v."faceId"
-          WHERE v."workflowStatus" = 'READY'::"WorkflowStatus"
+          WHERE v."workflowStatus" IN ('READY'::"WorkflowStatus", 'CONTENT_READY'::"WorkflowStatus")
             AND v."approvalStatus" = 'APPROVED'::"ApprovalStatus"
             AND v."readyAt" IS NOT NULL
             AND f."active" = true
@@ -146,7 +146,7 @@ export async function selectReadyBacklog(db: PrismaClient, options: SelectReadyB
             },
           });
           const updated = await tx.video.updateMany({
-            where: { id: candidate.id, workflowStatus: 'READY', approvalStatus: 'APPROVED' },
+            where: { id: candidate.id, workflowStatus: { in: ['READY', 'CONTENT_READY'] }, approvalStatus: 'APPROVED' },
             data: { workflowStatus: 'SELECTED' },
           });
           if (updated.count !== 1)
@@ -235,7 +235,7 @@ export async function selectDailyReels(db: PrismaClient, options: SelectDailyOpt
       SELECT v."id", v."videoId", v."faceId", v."readyAt"
       FROM "Video" AS v
       JOIN "Face" AS f ON f."id" = v."faceId"
-      WHERE v."workflowStatus" = 'READY'::"WorkflowStatus"
+      WHERE v."workflowStatus" IN ('READY'::"WorkflowStatus", 'CONTENT_READY'::"WorkflowStatus")
         AND v."approvalStatus" = 'APPROVED'::"ApprovalStatus"
         AND v."readyAt" IS NOT NULL
         AND f."active" = true
@@ -272,7 +272,7 @@ export async function selectDailyReels(db: PrismaClient, options: SelectDailyOpt
           },
         });
         const updated = await tx.video.updateMany({
-          where: { id: candidate.id, workflowStatus: 'READY', approvalStatus: 'APPROVED' },
+          where: { id: candidate.id, workflowStatus: { in: ['READY', 'CONTENT_READY'] }, approvalStatus: 'APPROVED' },
           data: { workflowStatus: 'SELECTED' },
         });
         if (updated.count !== 1)

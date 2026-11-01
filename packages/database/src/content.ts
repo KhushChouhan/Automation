@@ -27,7 +27,7 @@ export async function beginContentGeneration(db: PrismaClient, input: ContentCla
     if (!video.title || !video.faceId || video.approvalStatus !== 'APPROVED')
       throw new Error('Content generation requires approved title, face and video');
     if (
-      !['SELECTED', 'CONTENT_GENERATING', 'CONTENT_READY', 'SCHEDULED'].includes(
+      !['READY', 'SELECTED', 'CONTENT_GENERATING', 'CONTENT_READY', 'SCHEDULED'].includes(
         video.workflowStatus,
       )
     )

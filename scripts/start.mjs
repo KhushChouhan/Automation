@@ -65,6 +65,22 @@ if (process.env['DATABASE_URL']) {
       }
     }
   }
+
+  // Self-heal stale sync conflicts from previous failed syncs
+  try {
+    const { PrismaClient } = await import('@prisma/client');
+    const healDb = new PrismaClient();
+    const healed = await healDb.syncConflict.updateMany({
+      where: { resolvedAt: null, reason: { in: ['UNRESOLVED_CONFLICT', 'UNKNOWN_OR_INACTIVE_FACE'] } },
+      data: { resolvedAt: new Date() },
+    });
+    if (healed.count > 0) {
+      console.log(`[PROD] Self-healed ${healed.count} legacy sync conflict records.`);
+    }
+    await healDb.$disconnect();
+  } catch (err) {
+    console.warn('[PROD] Conflict heal notice:', err instanceof Error ? err.message : String(err));
+  }
 }
 
 // 3. Start Fastify API and Worker concurrently

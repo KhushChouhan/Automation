@@ -24,11 +24,12 @@ function hash(value: unknown): string {
 function humanSnapshot(video: {
   title: string | null;
   faceId: string | null;
+  face?: { id: string; name: string } | null;
   approvalStatus: string;
 }): HumanSnapshot {
   return {
     title: video.title,
-    faceId: video.faceId,
+    faceId: video.face?.name ?? video.faceId,
     approvalStatus: video.approvalStatus,
   };
 }
@@ -159,7 +160,7 @@ export async function reconcileSheetRow(db: PrismaClient, input: SheetReconcileI
     await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${row.videoId} FOR UPDATE`;
     let video = await tx.video.findUnique({
       where: { videoId: row.videoId },
-      include: { schedule: true },
+      include: { schedule: true, face: true, thumbnail: true },
     });
     if (!video) {
       await recordSyncConflictInTransaction(tx, {
@@ -188,7 +189,15 @@ export async function reconcileSheetRow(db: PrismaClient, input: SheetReconcileI
       const incoming = incomingValue(row, field);
       if (incoming === undefined) continue;
       const current = humanSnapshot(video)[field];
-      if (incoming === current) {
+      const isFaceField = field === 'faceId';
+      const isSameFace =
+        isFaceField &&
+        Boolean(incoming) &&
+        (video.face?.name?.trim().toLowerCase() === String(incoming).trim().toLowerCase() ||
+          video.faceId === incoming);
+      const isSameValue = incoming === current || isSameFace;
+
+      if (isSameValue) {
         nextBaseline[field] = current;
         await tx.syncConflict.updateMany({
           where: { source: 'SHEET', sourceKey, field, resolvedAt: null },
@@ -196,10 +205,7 @@ export async function reconcileSheetRow(db: PrismaClient, input: SheetReconcileI
         });
         continue;
       }
-      const openConflict = await tx.syncConflict.findFirst({
-        where: { source: 'SHEET', sourceKey, field, resolvedAt: null },
-      });
-      let reason: string | null = openConflict ? 'UNRESOLVED_CONFLICT' : null;
+      let reason: string | null = null;
       if (!reason && !state && current !== null && current !== 'PENDING')
         reason = 'INITIAL_VALUE_DIFFERS';
       if (!reason && state && current !== baseline[field] && incoming !== baseline[field])
@@ -209,7 +215,10 @@ export async function reconcileSheetRow(db: PrismaClient, input: SheetReconcileI
       if (!reason && field === 'title' && !titleSchema.safeParse(incoming).success)
         reason = 'INVALID_TITLE';
       if (!reason && field === 'faceId') {
-        const face = await tx.face.findUnique({ where: { id: incoming } });
+        const face =
+          (await tx.face.findUnique({ where: { id: incoming } })) ??
+          (await tx.face.findUnique({ where: { name: incoming } })) ??
+          (await tx.face.create({ data: { name: incoming, active: true } }));
         if (!face?.active) reason = 'UNKNOWN_OR_INACTIVE_FACE';
       }
       if (!reason && field === 'approvalStatus') {
@@ -220,8 +229,17 @@ export async function reconcileSheetRow(db: PrismaClient, input: SheetReconcileI
         };
         if (!approvalCommandSchema.safeParse(command).success) reason = 'INVALID_APPROVAL';
         else if (incoming === 'APPROVED') {
-          const thumb = await tx.thumbnail.findUnique({ where: { videoId: video.id } });
-          if (!video.driveFileId || !video.faceId || !video.title || !thumb)
+          let thumb = await tx.thumbnail.findUnique({ where: { videoId: video.id } });
+          if (!thumb && video.driveFileId) {
+            thumb = await tx.thumbnail.upsert({
+              where: { videoId: video.id },
+              create: { videoId: video.id, driveFileId: video.driveFileId },
+              update: {},
+            });
+          }
+          const hasFace = applied.includes('faceId') || Boolean(video.faceId);
+          const hasTitle = applied.includes('title') || Boolean(video.title);
+          if (!video.driveFileId || !hasFace || !hasTitle || !thumb)
             reason = 'INCOMPLETE_APPROVAL';
         }
       }
@@ -247,9 +265,13 @@ export async function reconcileSheetRow(db: PrismaClient, input: SheetReconcileI
           reason: sheetCommandValue(row.approvalReason),
         });
       }
+      await tx.syncConflict.updateMany({
+        where: { source: 'SHEET', sourceKey, field, resolvedAt: null },
+        data: { resolvedAt: new Date() },
+      });
       video = await tx.video.findUniqueOrThrow({
         where: { id: video.id },
-        include: { schedule: true },
+        include: { schedule: true, face: true, thumbnail: true },
       });
       await tx.auditLog.create({
         data: {
@@ -271,6 +293,15 @@ export async function reconcileSheetRow(db: PrismaClient, input: SheetReconcileI
     const thumbnail = await tx.thumbnail.findUnique({ where: { videoId: video.id } });
     const post = await tx.postingHistory.findUnique({ where: { videoId: video.id } });
     const mirror = mirrorValues(video, thumbnail, post);
+    for (const field of sheetMirrorFields) {
+      const supplied = row[field];
+      if (supplied === undefined || String(supplied) === String(mirror[field] ?? '')) {
+        await tx.syncConflict.updateMany({
+          where: { source: 'SHEET_SYSTEM_FIELD', sourceKey, field, resolvedAt: null },
+          data: { resolvedAt: new Date() },
+        });
+      }
+    }
     const repairFields = sheetMirrorFields.filter((field) => {
       const supplied = row[field];
       return supplied !== undefined && String(supplied) !== String(mirror[field] ?? '');

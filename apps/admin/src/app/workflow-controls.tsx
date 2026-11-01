@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 const actions = [
   ['generate', 'Generate Content'],
@@ -11,6 +12,7 @@ const actions = [
 ] as const;
 
 export function WorkflowControls({ videoId }: { videoId: string }) {
+  const router = useRouter();
   const [running, setRunning] = useState<string | null>(null);
   const [message, setMessage] = useState('');
 
@@ -24,7 +26,15 @@ export function WorkflowControls({ videoId }: { videoId: string }) {
         body: JSON.stringify({ videoId, action }),
       });
       const result = (await response.json()) as { queued?: boolean; error?: string };
-      setMessage(response.ok && result.queued ? 'Queued' : (result.error ?? 'Request failed'));
+      if (response.ok && result.queued) {
+        setMessage('Queued! Refreshing…');
+        setTimeout(() => {
+          router.refresh();
+          setMessage('Queued');
+        }, 2500);
+      } else {
+        setMessage(result.error ?? 'Request failed');
+      }
     } catch {
       setMessage('API unavailable');
     } finally {
@@ -46,7 +56,9 @@ export function WorkflowControls({ videoId }: { videoId: string }) {
           </button>
         ))}
       </div>
-      <span aria-live="polite">{message}</span>
+      <span aria-live="polite" style={{ fontSize: '0.85rem', fontWeight: 500 }}>
+        {message}
+      </span>
     </div>
   );
 }
