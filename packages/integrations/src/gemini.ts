@@ -251,7 +251,12 @@ export class GeminiContentGenerator implements ContentGenerator {
         } catch (error) {
           if (
             error instanceof GeminiGenerationError &&
-            (error.code === 'MODEL_UNAVAILABLE' || error.code === 'VALIDATION' || error.code === 'TRANSIENT_SERVER') &&
+            (error.code === 'MODEL_UNAVAILABLE' ||
+              error.code === 'VALIDATION' ||
+              error.code === 'TRANSIENT_SERVER' ||
+              error.code === 'QUOTA' ||
+              error.code === 'RATE_LIMIT' ||
+              error.code === 'TIMEOUT') &&
             candidateModels.indexOf(activeModel) < candidateModels.length - 1
           ) {
             lastError = error;
