@@ -86,7 +86,7 @@ const envSchema = z.object({
   OPENAI_MODEL: optionalTrimmed.default('gpt-5.6-luna'),
   CONTENT_GENERATOR_PROVIDER: z.enum(['gemini', 'openai']).default('gemini'),
   GEMINI_API_KEY: optionalTrimmed,
-  GEMINI_MODEL: optionalTrimmed.default('gemini-3.8-flash'),
+  GEMINI_MODEL: optionalTrimmed.default('gemini-3.6-flash'),
   GEMINI_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
   GEMINI_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(6).default(3),
   CONTENT_PROMPT_VERSION: optionalTrimmed.default('real-estate-reels-v1'),
