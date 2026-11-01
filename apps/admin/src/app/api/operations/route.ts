@@ -34,7 +34,7 @@ export async function POST(request: Request) {
           : {}),
       },
       body: '{}',
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(15_000),
     });
     const result: unknown = await response.json();
     return NextResponse.json(result, {

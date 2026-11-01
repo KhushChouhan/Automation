@@ -469,10 +469,14 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
             ? 'RUNNING'
             : video.content.length
               ? 'READY'
-              : 'PENDING',
+              : video.workflowStatus === 'FAILED'
+                ? 'FAILED'
+                : 'PENDING',
         durableMediaObjectStatus: video.schedule?.mediaAsset?.status ?? 'PENDING',
         deliveryUrlPolicy: 'EPHEMERAL_JIT',
-        lastError: video.publishAttempts[0]?.errorCode ?? null,
+        lastError:
+          video.publishAttempts[0]?.errorCode ??
+          (video.workflowStatus === 'FAILED' ? 'GENERATION_FAILED' : null),
         retryCount: video._count.publishAttempts,
       })),
     };
@@ -486,6 +490,19 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
   app.get('/api/v1/integrations/status', async (_request, reply) => {
     reply.header('cache-control', 'no-store');
     return integrationReadiness(env);
+  });
+
+  app.get('/api/v1/integrations/gemini/models', async (request, reply) => {
+    const apiKey = env['GEMINI_API_KEY'];
+    if (!apiKey) return reply.code(400).send({ error: 'GEMINI_API_KEY is not configured' });
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      const data = await res.json();
+      reply.header('cache-control', 'no-store');
+      return data;
+    } catch (err) {
+      return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   app.get('/api/v1/integrations/meta/status', async (request, reply) => {
@@ -652,11 +669,15 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     if (!queue) return reply.code(503).send({ error: 'Queue is unavailable' });
     if (!contentOperation && !video.schedule)
       return reply.code(409).send({ error: 'Video has no schedule to prepare' });
-    const uniqueAttempt = operation === 'regenerate' || operation === 'retry-media';
-    const requestId = uniqueAttempt ? `${operation}-${id}-${Date.now()}` : undefined;
-    const jobId =
-      requestId ??
-      (contentOperation
+    const uniqueAttempt =
+      operation === 'regenerate' ||
+      operation === 'retry-content' ||
+      operation === 'retry-media' ||
+      operation === 'generate';
+    const requestId = `${operation}-${id}-${Date.now()}`;
+    const jobId = uniqueAttempt
+      ? requestId
+      : (contentOperation
         ? `generate-${id}-v${video.inputVersion}`
         : `prepare-${video.schedule?.id ?? id}`);
     const job = await queue.add(

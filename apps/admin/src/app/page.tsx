@@ -124,7 +124,7 @@ async function getDashboard(): Promise<Dashboard> {
   const baseUrl = process.env['API_BASE_URL'] ?? 'http://127.0.0.1:3001';
   const response = await fetch(`${baseUrl}/api/v1/dashboard`, {
     cache: 'no-store',
-    signal: AbortSignal.timeout(4000),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
   return response.json() as Promise<Dashboard>;
@@ -137,7 +137,7 @@ async function getApiJson<T>(path: string): Promise<T> {
     headers: process.env['ADMIN_API_TOKEN']
       ? { authorization: `Bearer ${process.env['ADMIN_API_TOKEN']}` }
       : undefined,
-    signal: AbortSignal.timeout(4_000),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) throw new Error(`Operations API returned ${response.status}`);
   return response.json() as Promise<T>;

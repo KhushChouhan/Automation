@@ -13,7 +13,7 @@ export async function POST() {
           : {}),
       },
       body: '{}',
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(15_000),
     });
     const body: unknown = await response.json();
     return NextResponse.json(body, {
