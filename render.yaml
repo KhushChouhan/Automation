@@ -44,7 +44,7 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-2.0-flash
+        value: gemini-3.8-flash
       - key: MEDIA_STORAGE_PROVIDER
         value: cloudinary
       - key: CLOUDINARY_CLOUD_NAME

@@ -143,11 +143,11 @@ export class GeminiContentGenerator implements ContentGenerator {
     const maxAttempts = this.options.maxAttempts ?? 3;
     const rawModel = input.model?.replace(/^models\//, '').trim();
     const candidateModels = [
-      'gemini-2.5-flash',
-      'gemini-flash-latest',
-      'gemini-2.5-flash-lite',
-      'gemini-3.6-flash',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-3.5-flash',
       'gemini-3.7-flash',
+      'gemini-flash-latest',
       rawModel,
     ].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
 

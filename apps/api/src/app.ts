@@ -509,10 +509,11 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     const apiKey = env['GEMINI_API_KEY'];
     if (!apiKey) return reply.code(400).send({ error: 'GEMINI_API_KEY is not configured' });
     const modelsToTry = [
-      'gemini-2.5-flash',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-3.5-flash',
+      'gemini-3.7-flash',
       'gemini-flash-latest',
-      'gemini-2.5-flash-lite',
-      'gemini-3.6-flash',
     ];
     const results: Record<string, unknown> = {};
     for (const model of modelsToTry) {
@@ -526,7 +527,7 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
               contents: [
                 {
                   role: 'user',
-                  parts: [{ text: 'Return valid JSON with caption, hashtags (array of strings), and cta.' }],
+                  parts: [{ text: 'Return valid JSON with keys: caption, hashtags, cta' }],
                 },
               ],
               generationConfig: {
