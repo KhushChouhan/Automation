@@ -154,18 +154,21 @@ describe('Sheets v4 adapter', () => {
         videoId: 'GCS-42',
         videoLink: 'https://drive.google.com/file/d/abc_DEF-123456/view',
         status: 'WAITING_FACE',
+        approvalStatus: 'PENDING',
       },
     ]);
 
     const writes = (
       batchUpdate.mock.calls[0]?.[0] as {
-        requestBody: { data: Array<{ range: string }> };
+        requestBody: { data: Array<{ range: string; values: unknown[][] }> };
       }
     ).requestBody.data;
+    expect(writes.find(({ range }) => range === 'Videos!F2:F2')?.values).toEqual([['PENDING']]);
     expect(writes.map(({ range }) => range)).toEqual([
       'Videos!A2:A2',
       'Videos!C2:C2',
       'Videos!E2:E2',
+      'Videos!F2:F2',
       'Videos!G2:Q2',
     ]);
   });
@@ -305,13 +308,15 @@ describe('Sheets v4 adapter', () => {
     expect(videoWrite.requestBody.data.map(({ range }) => range)).toEqual([
       'Videos!C2:C2',
       'Videos!E2:E2',
+      'Videos!F2:F2',
       'Videos!G2:Q2',
       'Videos!A3:A3',
       'Videos!C3:C3',
       'Videos!E3:E3',
+      'Videos!F3:F3',
       'Videos!G3:Q3',
     ]);
-    expect(videoWrite.requestBody.data.some(({ range }) => /Videos![BDF]/.test(range))).toBe(false);
+    expect(videoWrite.requestBody.data.some(({ range }) => /Videos![BD]/.test(range))).toBe(false);
     expect(
       videoWrite.requestBody.data.find(({ range }) => range === 'Videos!A3:A3')?.values,
     ).toEqual([['GCS-2']]);

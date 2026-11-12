@@ -116,6 +116,19 @@ describe('Google Sheet reconciliation and mirror invariants', () => {
         workflowStatus: 'WAITING_APPROVAL',
       });
 
+      const invalid = await reconcile(client, {
+        spreadsheetId: 'qa-sheet-partial',
+        row: { videoId, approvalStatus: 'APPROVED' },
+        actorId: 'qa-reviewer',
+      });
+      expect(invalid.repairFields).toContain('approvalStatus');
+      expect(
+        await client.syncConflict.count({
+          where: { videoId: video.id, source: 'SHEET_SYSTEM_FIELD', field: 'approvalStatus' },
+        }),
+      ).toBe(1);
+      expect(await client.thumbnail.count({ where: { videoId: video.id } })).toBe(0);
+      expect(await client.approvalEvent.count({ where: { videoId: video.id } })).toBe(0);
       const mirror = await prepare(client, videoId);
       const input = {
         spreadsheetId: 'qa-sheet-partial',

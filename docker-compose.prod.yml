@@ -1,66 +1,56 @@
-services:
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-reels_automation}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    ports:
-      - '127.0.0.1:5432:5432'
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres -d reels_automation']
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
+# Production topology: provision managed PostgreSQL and Redis 7/8 separately.
+# This file intentionally defines no local datastore containers.
+x-runtime: &runtime
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: production
+  env_file: .env
+  environment: &runtime-env
+    NODE_ENV: production
+    DATABASE_URL: ${DATABASE_URL:?Set the managed PostgreSQL connection URL}
+    REDIS_URL: ${REDIS_URL:?Set the shared managed Redis connection URL}
+    AUTOMATION_ENABLED: 'false'
+    INSTAGRAM_PUBLISHING_ENABLED: 'false'
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ['redis-server', '--appendonly', 'yes']
-    ports:
-      - '127.0.0.1:6379:6379'
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
+services:
+  migrate:
+    <<: *runtime
+    command: ['node', 'scripts/start.mjs', 'migrate']
+    restart: 'no'
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: api
+    <<: *runtime
+    command: ['node', 'scripts/start.mjs', 'api']
     restart: unless-stopped
-    env_file:
-      - .env
     ports:
-      - '8000:8000'
+      - '127.0.0.1:8000:8000'
+    environment:
+      <<: *runtime-env
+      PORT: '8000'
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: worker
+    <<: *runtime
+    command: ['node', 'scripts/start.mjs', 'worker']
     restart: unless-stopped
-    env_file:
-      - .env
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   admin:
     build:
@@ -68,13 +58,13 @@ services:
       dockerfile: Dockerfile
       target: admin
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      NODE_ENV: production
+      API_BASE_URL: http://api:8000
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:?Set the same private token as the API}
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?Set the dashboard password}
     ports:
-      - '3000:3000'
+      - '127.0.0.1:3000:3000'
     depends_on:
       - api
-
-volumes:
-  postgres_data:
-  redis_data:

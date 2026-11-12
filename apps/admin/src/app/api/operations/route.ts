@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { authorizeMutation } from '../../authorize-mutation';
 
 const routes = {
   generate: 'content/generate',
@@ -9,6 +10,8 @@ const routes = {
 } as const;
 
 export async function POST(request: Request) {
+  const denied = authorizeMutation(request);
+  if (denied) return denied;
   const body = (await request.json().catch(() => null)) as {
     videoId?: unknown;
     action?: unknown;
@@ -17,14 +20,17 @@ export async function POST(request: Request) {
     typeof body?.videoId !== 'string' ||
     !/^GCS-[0-9]{4,}$/.test(body.videoId) ||
     typeof body.action !== 'string' ||
-    !(body.action in routes)
+    !Object.hasOwn(routes, body.action)
   )
     return NextResponse.json({ error: 'Invalid operation request' }, { status: 400 });
 
-  const baseUrl = process.env['API_BASE_URL'] ?? 'http://127.0.0.1:3001';
+  const baseUrl = process.env['API_BASE_URL'];
+  if (!process.env['ADMIN_API_TOKEN'] || (!baseUrl && process.env['NODE_ENV'] === 'production'))
+    return NextResponse.json({ error: 'Admin API access is not configured' }, { status: 503 });
+  const resolvedBaseUrl = baseUrl ?? 'http://127.0.0.1:3001';
   const route = routes[body.action as keyof typeof routes];
   try {
-    const response = await fetch(`${baseUrl}/api/v1/videos/${body.videoId}/${route}`, {
+    const response = await fetch(`${resolvedBaseUrl}/api/v1/videos/${body.videoId}/${route}`, {
       method: 'POST',
       cache: 'no-store',
       headers: {

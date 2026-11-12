@@ -1,9 +1,15 @@
 import { NextResponse } from 'next/server';
+import { authorizeMutation } from '../../../authorize-mutation';
 
-export async function POST() {
-  const baseUrl = process.env['API_BASE_URL'] ?? 'http://127.0.0.1:3001';
+export async function POST(request: Request) {
+  const denied = authorizeMutation(request);
+  if (denied) return denied;
+  const baseUrl = process.env['API_BASE_URL'];
+  if (!process.env['ADMIN_API_TOKEN'] || (!baseUrl && process.env['NODE_ENV'] === 'production'))
+    return NextResponse.json({ error: 'Admin API access is not configured' }, { status: 503 });
+  const resolvedBaseUrl = baseUrl ?? 'http://127.0.0.1:3001';
   try {
-    const response = await fetch(`${baseUrl}/api/v1/sync/google`, {
+    const response = await fetch(`${resolvedBaseUrl}/api/v1/sync/google`, {
       method: 'POST',
       cache: 'no-store',
       headers: {

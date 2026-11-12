@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import { approvalStatuses } from './status.js';
 import { permanentVideoIdSchema } from './validation.js';
 
 /** Only these columns can provide human input. Every other known column is a DB mirror. */
-export const sheetHumanFields = ['title', 'faceId', 'approvalStatus'] as const;
+export const sheetHumanFields = ['title', 'faceId'] as const;
 export const sheetMirrorFields = [
+  'approvalStatus',
   'workflowStatus',
   'inputVersion',
   'driveFileId',
@@ -19,7 +19,7 @@ export const sheetRowSchema = z
     videoId: permanentVideoIdSchema,
     title: z.string().max(180).optional(),
     faceId: z.string().max(120).optional(),
-    approvalStatus: z.enum(approvalStatuses).optional(),
+    approvalStatus: z.string().max(120).optional(),
     approvalReason: z.string().max(1000).optional(),
     rowVersion: z.string().max(200).optional(),
     // System-owned Sheet cells may contain arbitrary human edits. Accept the text so

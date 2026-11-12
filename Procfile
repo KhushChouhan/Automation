@@ -1,3 +1,4 @@
-api: node apps/api/dist/main.js
-worker: node apps/worker/dist/main.js
+release: node scripts/start.mjs migrate
+api: node scripts/start.mjs api
+worker: node scripts/start.mjs worker
 admin: pnpm --filter @gcs/admin start

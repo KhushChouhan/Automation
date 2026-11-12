@@ -54,8 +54,30 @@ describe('Gemini structured content generator', () => {
     });
     expect(requests[0]?.url).toContain('models/gemini-3.6-flash:generateContent');
     expect(JSON.parse(requests[0]?.body ?? '')).toMatchObject({
-      generationConfig: { responseMimeType: 'application/json' },
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: { required: ['caption', 'hashtags', 'cta'] },
+      },
     });
+  });
+
+  it('uses only the configured model and never falls back on a 404', async () => {
+    const requests: string[] = [];
+    const generator = new GeminiContentGenerator('test-key', {
+      fetch: (url) => {
+        requests.push(typeof url === 'string' ? url : url instanceof URL ? url.href : url.url);
+        return Promise.resolve(new Response('{}', { status: 404 }));
+      },
+      maxAttempts: 3,
+    });
+    await expect(
+      generator.generate({ ...input, model: 'models/configured-model' }),
+    ).rejects.toMatchObject({
+      code: 'MODEL_UNAVAILABLE',
+      retryable: false,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain('/models/configured-model:generateContent');
   });
 
   it('classifies quota and malformed responses without retrying them', async () => {

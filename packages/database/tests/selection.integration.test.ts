@@ -69,6 +69,15 @@ describe('PostgreSQL persistence invariants', () => {
       const second = await discover(client, { driveFileId });
       expect(second.id).toBe(first.id);
       expect(second.videoId).toBe(first.videoId);
+      await expect(
+        client.video.update({
+          where: { id: first.id },
+          data: { driveFileId: `${driveFileId}-replacement` },
+        }),
+      ).rejects.toThrow(/immutable/);
+      await expect(
+        client.video.update({ where: { id: first.id }, data: { videoId: `${first.videoId}0` } }),
+      ).rejects.toThrow(/immutable/);
       expect(await client.video.count({ where: { driveFileId } })).toBe(1);
     },
   );
@@ -112,6 +121,8 @@ describe('PostgreSQL persistence invariants', () => {
             data: {
               videoId: `GCS-${numericToken}${index}`,
               driveFileId,
+              title: 'Approved title',
+              thumbnail: { create: { driveFileId: `cover-${driveFileId}` } },
               faceId: face.id,
               workflowStatus: 'READY',
               approvalStatus: 'APPROVED',

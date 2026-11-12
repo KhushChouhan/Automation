@@ -5,6 +5,8 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
+    "preDeployCommand": ["node scripts/start.mjs migrate"],
+    "startCommand": "node scripts/start.mjs",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

@@ -1,5 +1,8 @@
+import Link from 'next/link';
+import { apiJson } from './api-client';
 import { SyncControl } from './sync-control';
 import { MetaStatusControl } from './meta-status-control';
+import { SchedulingControl } from './scheduling-control';
 import { WorkflowControls } from './workflow-controls';
 
 export const dynamic = 'force-dynamic';
@@ -18,7 +21,7 @@ type Slot = {
 type Dashboard = {
   businessDate: string;
   timezone: string;
-  automation: { enabled: boolean; updatedAt: string | null; source: string };
+  automation: { enabled: boolean; version: number; updatedAt: string | null; source: string };
   slots: Slot[];
   counts: {
     waiting: number;
@@ -120,28 +123,15 @@ type MetaStatus = {
   capabilities: Record<string, 'SUPPORTED' | 'UNSUPPORTED' | 'REQUIRES_VERIFICATION'>;
 };
 
-async function getDashboard(): Promise<Dashboard> {
-  const baseUrl = process.env['API_BASE_URL'] ?? 'http://127.0.0.1:3001';
-  const response = await fetch(`${baseUrl}/api/v1/dashboard`, {
-    cache: 'no-store',
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
-  return response.json() as Promise<Dashboard>;
-}
+type OperationsStatus = {
+  status: string;
+  revision: string | null;
+  dependencies: { postgres: string; redis: string };
+  worker: { status: string; revision: string | null; observedAt: string | null };
+};
 
-async function getApiJson<T>(path: string): Promise<T> {
-  const baseUrl = process.env['API_BASE_URL'] ?? 'http://127.0.0.1:3001';
-  const response = await fetch(`${baseUrl}${path}`, {
-    cache: 'no-store',
-    headers: process.env['ADMIN_API_TOKEN']
-      ? { authorization: `Bearer ${process.env['ADMIN_API_TOKEN']}` }
-      : undefined,
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) throw new Error(`Operations API returned ${response.status}`);
-  return response.json() as Promise<T>;
-}
+const getDashboard = () => apiJson<Dashboard>('/api/v1/dashboard');
+const getApiJson = apiJson;
 
 function localTime(value: string | null, timezone: string): string {
   if (!value) return 'Not scheduled';
@@ -166,14 +156,24 @@ export default async function Home() {
   let queues: QueueStatus | null = null;
   let integrations: IntegrationStatus | null = null;
   let meta: MetaStatus | null = null;
+  let operations: OperationsStatus | null = null;
+  let partialError = false;
   let error: string | null = null;
   try {
-    [dashboard, queues, integrations, meta] = await Promise.all([
+    const results = await Promise.allSettled([
       getDashboard(),
       getApiJson<QueueStatus>('/api/v1/queues/status'),
       getApiJson<IntegrationStatus>('/api/v1/integrations/status'),
       getApiJson<MetaStatus>('/api/v1/integrations/meta/status'),
-    ]);
+      getApiJson<OperationsStatus>('/api/v1/operations'),
+    ] as const);
+    if (results[0].status === 'rejected') throw new Error('Dashboard unavailable');
+    dashboard = results[0].value;
+    queues = results[1].status === 'fulfilled' ? results[1].value : null;
+    integrations = results[2].status === 'fulfilled' ? results[2].value : null;
+    meta = results[3].status === 'fulfilled' ? results[3].value : null;
+    operations = results[4].status === 'fulfilled' ? results[4].value : null;
+    partialError = results.some((result) => result.status === 'rejected');
   } catch {
     error = 'Dashboard data is unavailable. Check that the API and database are running.';
   }
@@ -188,7 +188,7 @@ export default async function Home() {
           <p className="eyebrow">GREEN CITY SEZ</p>
           <h1>Reel operations</h1>
         </div>
-        <span className="read-only">Local operations</span>
+        <span className="read-only">Authenticated operations</span>
       </header>
       {error ? (
         <section className="error-panel" role="alert">
@@ -197,6 +197,36 @@ export default async function Home() {
         </section>
       ) : dashboard ? (
         <>
+          {partialError ? (
+            <p role="status">
+              Some integration or operational status is unavailable. Inventory remains visible.
+            </p>
+          ) : null}
+          <section className="phase-grid" aria-label="Operational health">
+            <article className="phase-card">
+              <span>API</span>
+              <strong>{operations ? label(operations.status) : 'Unavailable'}</strong>
+              <small>Revision {operations?.revision ?? 'Unknown'}</small>
+            </article>
+            <article className="phase-card">
+              <span>PostgreSQL</span>
+              <strong>{label(operations?.dependencies.postgres ?? 'unavailable')}</strong>
+            </article>
+            <article className="phase-card">
+              <span>Redis delivery</span>
+              <strong>{label(operations?.dependencies.redis ?? 'unavailable')}</strong>
+            </article>
+            <article className="phase-card">
+              <span>Worker heartbeat</span>
+              <strong>{label(operations?.worker.status ?? 'unavailable')}</strong>
+              <small>
+                {operations?.worker.observedAt
+                  ? localTime(operations.worker.observedAt, dashboard.timezone)
+                  : 'No recent heartbeat'}{' '}
+                · Revision {operations?.worker.revision ?? 'Unknown'}
+              </small>
+            </article>
+          </section>
           <section className="overview-heading">
             <div>
               <p className="eyebrow">OVERVIEW</p>
@@ -205,11 +235,26 @@ export default async function Home() {
                 {dashboard.businessDate} · {dashboard.timezone}
               </p>
             </div>
-            <div className={`automation ${dashboard.automation.enabled ? 'is-on' : 'is-off'}`}>
-              <span className="dot" />
-              Automation {dashboard.automation.enabled ? 'enabled' : 'off'}
+            <div className="automation-control">
+              <div className={`automation ${dashboard.automation.enabled ? 'is-on' : 'is-off'}`}>
+                <span className="dot" />
+                Scheduling {dashboard.automation.enabled ? 'enabled' : 'off'} · Instagram writes
+                disabled
+              </div>
+              <SchedulingControl
+                enabled={dashboard.automation.enabled}
+                version={dashboard.automation.version}
+                compact
+              />
             </div>
           </section>
+          {dashboard.slots.every((slot) => !slot.videoId) ? (
+            <p className="slot-empty-note" role="note">
+              No video is assigned yet. Review the{' '}
+              <Link href="/videos?filter=waiting">Waiting videos</Link>, complete
+              Face/Title/Thumbnail and approval, then enable scheduling.
+            </p>
+          ) : null}
 
           <section className="slots" aria-label="Today’s publishing slots">
             {dashboard.slots.map((slot) => (
@@ -262,11 +307,15 @@ export default async function Home() {
               ['Failed', dashboard.counts.failed, 'Requires investigation'],
               ['Manual action', dashboard.counts.manualAction, 'Follow-up outside automation'],
             ].map(([name, count, hint]) => (
-              <article className="metric" key={name}>
+              <a
+                className="metric"
+                key={name}
+                href={`/videos?filter=${name === 'Manual action' ? 'manualAction' : String(name).toLowerCase()}`}
+              >
                 <span>{name}</span>
                 <strong>{count}</strong>
                 <small>{hint}</small>
-              </article>
+              </a>
             ))}
           </section>
 
@@ -342,9 +391,7 @@ export default async function Home() {
           <section className="phase-grid" aria-label="Phase 3 integration status">
             <article className="phase-card">
               <span>Content generator</span>
-              <strong>
-                {integrations?.contentGenerator.provider === 'gemini' ? 'Gemini' : 'Not configured'}
-              </strong>
+              <strong>{label(integrations?.contentGenerator.provider ?? null)}</strong>
               <small>
                 {integrations?.contentGenerator.configured
                   ? integrations.contentGenerator.model
@@ -555,7 +602,7 @@ export default async function Home() {
                     </dd>
                   </div>
                   <div>
-                    <dt>Retries</dt>
+                    <dt>Publish attempts</dt>
                     <dd>{video.retryCount}</dd>
                   </div>
                   <div>
@@ -572,7 +619,22 @@ export default async function Home() {
                 ) : (
                   <p className="muted">No generated content yet.</p>
                 )}
-                <WorkflowControls videoId={video.videoId} />
+                {video.workflowStatus.startsWith('WAITING_') ? (
+                  <p className="input-needed-note">
+                    Required inputs are incomplete.{' '}
+                    <Link href={`/videos?q=${encodeURIComponent(video.videoId)}`}>
+                      Add Face or Title
+                    </Link>
+                  </p>
+                ) : null}
+                <WorkflowControls
+                  videoId={video.videoId}
+                  approvalStatus={video.approvalStatus}
+                  workflowStatus={video.workflowStatus}
+                  hasContent={Boolean(video.content)}
+                  hasSchedule={Boolean(video.scheduledDate)}
+                  mediaStatus={video.durableMediaObjectStatus}
+                />
               </article>
             ))}
           </section>

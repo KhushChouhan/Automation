@@ -1,4 +1,4 @@
-import { permanentVideoIdSchema } from '@gcs/core';
+import { acceptsWorkflowInput, permanentVideoIdSchema } from '@gcs/core';
 import type { PrismaClient } from '@prisma/client';
 import { recordSyncConflictInTransaction } from './sheet-sync.js';
 import { attachThumbnailInTransaction } from './videos.js';
@@ -97,17 +97,25 @@ export async function reconcileDriveThumbnails(
       await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${videoId} FOR UPDATE`;
       const video = await tx.video.findUnique({
         where: { videoId },
-        include: { thumbnail: true, schedule: true },
+        include: { thumbnail: true, schedule: true, postingHistory: true },
       });
       if (!video) return 'UNKNOWN_VIDEO';
-      if (video.thumbnail?.driveFileId === asset.fileId) return 'ALREADY_ATTACHED';
-      if (video.thumbnail || video.schedule || video.workflowStatus === 'POSTED') {
+      const sameFile = video.thumbnail?.driveFileId === asset.fileId;
+      if (sameFile && (!asset.checksum || video.thumbnail?.checksum === asset.checksum))
+        return 'ALREADY_ATTACHED';
+      const conflictingThumbnail = Boolean(video.thumbnail && !sameFile);
+      if (
+        conflictingThumbnail ||
+        video.schedule ||
+        video.postingHistory ||
+        !acceptsWorkflowInput(video.workflowStatus)
+      ) {
         await recordSyncConflictInTransaction(tx, {
           source: 'DRIVE_THUMBNAIL',
           sourceKey: videoId,
           videoId: video.id,
           field: 'thumbnail',
-          reason: video.thumbnail ? 'EXISTING_THUMBNAIL' : 'VIDEO_LOCKED',
+          reason: conflictingThumbnail ? 'EXISTING_THUMBNAIL' : 'VIDEO_LOCKED',
           databaseValue: video.thumbnail?.driveFileId,
           incomingValue: asset.fileId,
         });
@@ -118,7 +126,7 @@ export async function reconcileDriveThumbnails(
             entity: 'Video',
             entityId: video.id,
             after: {
-              reason: video.thumbnail ? 'EXISTING_THUMBNAIL' : 'VIDEO_LOCKED',
+              reason: conflictingThumbnail ? 'EXISTING_THUMBNAIL' : 'VIDEO_LOCKED',
               driveFileId: asset.fileId,
             },
           },
@@ -126,7 +134,7 @@ export async function reconcileDriveThumbnails(
         return 'CONFLICT';
       }
       const other = await tx.thumbnail.findUnique({ where: { driveFileId: asset.fileId } });
-      if (other) {
+      if (other && other.videoId !== video.id) {
         await recordSyncConflictInTransaction(tx, {
           source: 'DRIVE_THUMBNAIL',
           sourceKey: videoId,
@@ -146,11 +154,7 @@ export async function reconcileDriveThumbnails(
         });
         return 'CONFLICT';
       }
-      await attachThumbnailInTransaction(tx, videoId, asset.fileId, actorId);
-      await tx.thumbnail.update({
-        where: { videoId: video.id },
-        data: { checksum: asset.checksum ?? null, mimeType: asset.mimeType ?? null },
-      });
+      await attachThumbnailInTransaction(tx, videoId, asset.fileId, actorId, asset);
       await tx.unmatchedThumbnail.deleteMany({ where: { driveFileId: asset.fileId } });
       await tx.auditLog.create({
         data: {

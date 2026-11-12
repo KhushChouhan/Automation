@@ -1,6 +1,10 @@
 import { Redis } from 'ioredis';
-import { loadConfig } from '@gcs/config';
-import { createDatabaseClient, selectReadyBacklog } from '@gcs/database';
+import { loadConfig, redisReconnectDelay } from '@gcs/config';
+import {
+  createDatabaseClient,
+  recoverStalePublishAttempts,
+  selectReadyBacklog,
+} from '@gcs/database';
 import { businessDateOf } from '@gcs/core';
 import { GoogleDriveV3Adapter, GoogleSheetsV4Adapter } from '@gcs/integrations';
 import { createLogger } from '@gcs/observability';
@@ -17,19 +21,30 @@ import {
   type MediaProcessorResult,
 } from './phase3.js';
 import { createInstagramPublishProcessors } from './instagram-publish.js';
+import { createHeartbeatWriter } from './heartbeat.js';
+import { schedulingAutomationEnabled } from './automation.js';
 
 const config = loadConfig();
 const logger = createLogger({ level: config.logLevel });
-const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+const redis = new Redis(config.redisUrl, {
+  maxRetriesPerRequest: null,
+  retryStrategy: redisReconnectDelay,
+});
 redis.on('error', (err) => {
-  logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Redis connection warning');
+  logger.warn(
+    { err: err instanceof Error ? err.message : String(err) },
+    'Redis connection warning',
+  );
 });
 const db = createDatabaseClient();
 const queues = Object.fromEntries(
   Object.values(QUEUE_NAMES).map((name) => {
     const queue = new Queue(name, { connection: redis });
     queue.on('error', (err) => {
-      logger.warn({ queue: name, err: err instanceof Error ? err.message : String(err) }, 'Queue connection warning');
+      logger.warn(
+        { queue: name, err: err instanceof Error ? err.message : String(err) },
+        'Queue connection warning',
+      );
     });
     return [name, queue];
   }),
@@ -67,8 +82,8 @@ const workers = startWorkerRuntime({
     },
     [QUEUE_NAMES.selectDailyReels]: async (job) => {
       const manual = job.data['manual'] === true;
-      if (!config.automationEnabled && !manual)
-        return { skipped: true, reason: 'Automation is OFF' };
+      const enabled = await schedulingAutomationEnabled(db, config.automationEnabled);
+      if (!enabled && !manual) return { skipped: true, reason: 'Automation is OFF' };
       const target =
         typeof job.data['businessDate'] === 'string'
           ? job.data['businessDate']
@@ -139,12 +154,42 @@ const dispatchOutbox = async () => {
   if (result.delivered || result.failed) logger.info(result, 'outbox dispatch completed');
 };
 await dispatchOutbox();
+const recoverPublishing = async () => {
+  if (!config.meta.publishingEnabled) return;
+  try {
+    await recoverStalePublishAttempts(db, { actorId: 'publish-recovery-worker' });
+  } catch {
+    logger.error({ operation: 'publish-recovery' }, 'publish recovery failed');
+  }
+};
+await recoverPublishing();
+const recoveryTimer = setInterval(() => void recoverPublishing(), 30_000);
+recoveryTimer.unref();
 const outboxTimer = setInterval(() => void dispatchOutbox(), 2_000);
 outboxTimer.unref();
+
+await Promise.all(workers.map((worker) => worker.waitUntilReady()));
+const workerRevision =
+  process.env['APP_REVISION'] ||
+  process.env['RENDER_GIT_COMMIT'] ||
+  process.env['RAILWAY_GIT_COMMIT_SHA'];
+const writeHeartbeat = createHeartbeatWriter({
+  redis,
+  queues: workers.length,
+  ...(workerRevision ? { revision: workerRevision } : {}),
+  startedAt: new Date(),
+  isRunning: () => workers.every((worker) => worker.isRunning() && !worker.isPaused()),
+  warn: () => logger.warn({ operation: 'worker-heartbeat' }, 'worker heartbeat unavailable'),
+});
+await writeHeartbeat();
+const heartbeatTimer = setInterval(() => void writeHeartbeat(), 15_000);
+heartbeatTimer.unref();
 
 const shutdown = async (signal: string) => {
   logger.info({ signal }, 'shutting down worker runtime');
   clearInterval(outboxTimer);
+  clearInterval(recoveryTimer);
+  clearInterval(heartbeatTimer);
   await stopWorkerRuntime(workers);
   await Promise.allSettled([
     ...Object.values(queues).map((queue) => queue.close()),

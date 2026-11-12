@@ -32,6 +32,7 @@ describe('bulk backlog selection persistence', () => {
           where: { eventKey: { in: schedules.map((schedule) => schedule.jobId) } },
         });
         await tx.schedule.deleteMany({ where: { videoId: { in: createdVideoIds } } });
+        await tx.thumbnail.deleteMany({ where: { videoId: { in: createdVideoIds } } });
         await tx.video.deleteMany({ where: { id: { in: createdVideoIds } } });
       }
       if (createdFaceIds.length)
@@ -65,6 +66,9 @@ describe('bulk backlog selection persistence', () => {
           initialClient.video.create({
             data: {
               videoId: `GCS-${numericToken}${String(index).padStart(2, '0')}`,
+              driveFileId: `video-${token}-${index}`,
+              title: `Bulk reel ${index}`,
+              thumbnail: { create: { driveFileId: `cover-${token}-${index}` } },
               faceId: faces[index % faces.length]!.id,
               workflowStatus: 'READY',
               approvalStatus: 'APPROVED',
@@ -83,10 +87,22 @@ describe('bulk backlog selection persistence', () => {
         startBusinessDate,
       };
       const [first, concurrent] = await Promise.all([
-        planner(initialClient, options),
-        planner(initialClient, options),
+        planner(initialClient, { ...options, horizonDays: 1 }),
+        planner(initialClient, { ...options, horizonDays: 1 }),
       ]);
-      expect(first.length + concurrent.length).toBe(50);
+      expect(first.length + concurrent.length).toBe(2);
+      expect(await planner(initialClient, { ...options, horizonDays: 1 })).toHaveLength(0);
+      const continuation = await planner(initialClient, {
+        ...options,
+        startBusinessDate: new Date(start.getTime() + 86_400_000).toISOString().slice(0, 10),
+      });
+      // The selector intentionally drains the global READY backlog. Other
+      // integration fixtures may coexist in a reused test database, so assert
+      // this scenario's permanent IDs without treating valid foreign work as a
+      // scheduler defect.
+      expect(
+        continuation.filter((schedule) => createdVideoIds.includes(schedule.videoId)),
+      ).toHaveLength(48);
 
       const persisted = await initialClient.schedule.findMany({
         where: { videoId: { in: createdVideoIds } },

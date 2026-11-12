@@ -1,11 +1,8 @@
 import {
   businessDateOf,
-  DEFAULT_SLOT_HOURS,
   parseBusinessDate,
-  pickEligibleVideos,
-  slotInstant,
+  planReadySlots,
   type SelectionCandidate,
-  type SelectionHistory,
 } from '@gcs/core';
 import type { PrismaClient } from '@prisma/client';
 
@@ -13,6 +10,7 @@ export interface SelectDailyOptions {
   businessDate: string;
   actorId: string;
   gapDays?: number;
+  now?: Date;
 }
 
 export interface SelectReadyBacklogOptions {
@@ -40,8 +38,8 @@ function validatePlanningOptions(options: SelectReadyBacklogOptions) {
   )
     throw new Error('horizonDays must be an integer from 1 to 366');
   const gapDays = options.gapDays ?? 2;
-  if (!Number.isInteger(gapDays) || gapDays < 1 || gapDays > 365)
-    throw new Error('gapDays must be an integer from 1 to 365');
+  if (gapDays !== 2)
+    throw new Error('gapDays must match the two-calendar-day face rotation policy');
   if (!options.actorId.trim()) throw new Error('actorId is required');
   const startBusinessDate = options.startBusinessDate ?? businessDateOf(now);
   parseBusinessDate(startBusinessDate);
@@ -57,6 +55,14 @@ function validatePlanningOptions(options: SelectReadyBacklogOptions) {
  * repeated or concurrent cycles idempotent.
  */
 export async function selectReadyBacklog(db: PrismaClient, options: SelectReadyBacklogOptions) {
+  return planSchedules(db, options, false);
+}
+
+async function planSchedules(
+  db: PrismaClient,
+  options: SelectReadyBacklogOptions,
+  includeExisting: boolean,
+) {
   const { now, gapDays, startBusinessDate } = validatePlanningOptions(options);
   const endBusinessDate = parseBusinessDate(startBusinessDate)
     .plus({ days: options.horizonDays - 1 })
@@ -81,7 +87,7 @@ export async function selectReadyBacklog(db: PrismaClient, options: SelectReadyB
         }),
         tx.postingHistory.findMany({
           where: { businessDate: { gte: historyStart, lte: historyEnd } },
-          select: { faceId: true, businessDate: true },
+          select: { videoId: true, faceId: true, businessDate: true },
         }),
         tx.$queryRaw<SelectionCandidate[]>`
           SELECT v."id", v."videoId", v."faceId", v."readyAt"
@@ -90,6 +96,13 @@ export async function selectReadyBacklog(db: PrismaClient, options: SelectReadyB
           WHERE v."workflowStatus" IN ('READY'::"WorkflowStatus", 'CONTENT_READY'::"WorkflowStatus")
             AND v."approvalStatus" = 'APPROVED'::"ApprovalStatus"
             AND v."readyAt" IS NOT NULL
+            AND NULLIF(btrim(v."driveFileId"), '') IS NOT NULL
+            AND NULLIF(btrim(v."title"), '') IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM "Thumbnail" t WHERE t."videoId" = v."id"
+                AND NULLIF(btrim(t."driveFileId"), '') IS NOT NULL
+                AND t."driveFileId" <> v."driveFileId"
+            )
             AND f."active" = true
             AND NOT EXISTS (SELECT 1 FROM "Schedule" s WHERE s."videoId" = v."id")
             AND NOT EXISTS (SELECT 1 FROM "PostingHistory" p WHERE p."videoId" = v."id")
@@ -103,163 +116,17 @@ export async function selectReadyBacklog(db: PrismaClient, options: SelectReadyB
         `,
       ]);
 
-      const unscheduled = [...candidates];
-      const history: SelectionHistory[] = [
-        ...schedules.map((row) => ({ faceId: row.faceId, businessDate: row.businessDate })),
-        ...postingHistory,
-      ];
-      const createdScheduleIds: string[] = [];
-
-      for (let offset = 0; offset < options.horizonDays && unscheduled.length; offset += 1) {
-        const businessDate = parseBusinessDate(startBusinessDate)
-          .plus({ days: offset })
-          .toISODate()!;
-        const occupied = new Set(
-          schedules.filter((row) => row.businessDate === businessDate).map((row) => row.slotHour),
-        );
-        const openHours = DEFAULT_SLOT_HOURS.filter(
-          (hour) =>
-            !occupied.has(hour) && slotInstant(businessDate, hour).getTime() > now.getTime(),
-        );
-        if (!openHours.length) continue;
-
-        const selected = pickEligibleVideos(
-          unscheduled,
-          history,
-          businessDate,
-          openHours.length,
-          gapDays,
-        );
-        for (let index = 0; index < selected.length; index += 1) {
-          const candidate = selected[index]!;
-          const slotHour = openHours[index]!;
-          const scheduledAt = slotInstant(businessDate, slotHour);
-          const jobId = `publish:${candidate.videoId}:${scheduledAt.toISOString()}`;
-          const schedule = await tx.schedule.create({
-            data: {
-              videoId: candidate.id,
-              faceId: candidate.faceId,
-              businessDate,
-              slotHour,
-              scheduledAt,
-              jobId,
-            },
-          });
-          const updated = await tx.video.updateMany({
-            where: { id: candidate.id, workflowStatus: { in: ['READY', 'CONTENT_READY'] }, approvalStatus: 'APPROVED' },
-            data: { workflowStatus: 'SELECTED' },
-          });
-          if (updated.count !== 1)
-            throw new Error(`Video ${candidate.videoId} changed during selection`);
-          await tx.outboxEvent.create({
-            data: {
-              eventKey: jobId,
-              eventType: 'selection.created',
-              payload: {
-                scheduleId: schedule.id,
-                videoId: candidate.videoId,
-                businessDate,
-                slotHour,
-                scheduledAtUtc: scheduledAt.toISOString(),
-                jobId,
-              },
-            },
-          });
-          await tx.auditLog.create({
-            data: {
-              actorId: options.actorId,
-              action: 'VIDEO_SELECTED',
-              entity: 'Schedule',
-              entityId: schedule.id,
-              after: {
-                videoId: candidate.videoId,
-                businessDate,
-                slotHour,
-                scheduledAtUtc: scheduledAt.toISOString(),
-              },
-            },
-          });
-          createdScheduleIds.push(schedule.id);
-          history.push({ faceId: candidate.faceId, businessDate });
-          unscheduled.splice(
-            unscheduled.findIndex((row) => row.id === candidate.id),
-            1,
-          );
-        }
-      }
-      return tx.schedule.findMany({
-        where: { id: { in: createdScheduleIds } },
-        orderBy: [{ businessDate: 'asc' }, { slotHour: 'asc' }],
-      });
-    },
-    { maxWait: 10_000, timeout: 30_000 },
-  );
-}
-
-/** All schedule and outbox writes are one PostgreSQL transaction. */
-export async function selectDailyReels(db: PrismaClient, options: SelectDailyOptions) {
-  const { businessDate, actorId, gapDays = 2 } = options;
-  const target = parseBusinessDate(businessDate);
-  if (!Number.isInteger(gapDays) || gapDays < 1 || gapDays > 365)
-    throw new Error('gapDays must be an integer from 1 to 365');
-  if (!actorId.trim()) throw new Error('actorId is required');
-  const earliestRelevantDate = target.minus({ days: gapDays - 1 }).toISODate()!;
-  const latestRelevantDate = target.plus({ days: gapDays - 1 }).toISODate()!;
-
-  return db.$transaction(
-    async (tx) => {
-      // Global planning lock also serializes concurrent selections of adjacent dates.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(5271, 1)`;
-      const existing = await tx.schedule.findMany({
-        where: { businessDate },
-        orderBy: { slotHour: 'asc' },
-      });
-      const occupiedHours = new Set(existing.map((row) => row.slotHour));
-      const openHours = DEFAULT_SLOT_HOURS.filter((hour) => !occupiedHours.has(hour));
-      if (openHours.length === 0) return existing;
-
-      const scheduleHistory = await tx.schedule.findMany({
-        where: {
-          businessDate: { gte: earliestRelevantDate, lte: latestRelevantDate },
-          status: { in: ['SELECTED', 'SCHEDULED', 'PUBLISHING', 'POSTED'] },
-        },
-        select: { faceId: true, businessDate: true },
-      });
-      const postingHistory = await tx.postingHistory.findMany({
-        where: { businessDate: { gte: earliestRelevantDate, lte: latestRelevantDate } },
-        select: { faceId: true, businessDate: true },
-      });
-      const history: SelectionHistory[] = [...scheduleHistory, ...postingHistory];
-
-      const candidates = await tx.$queryRaw<SelectionCandidate[]>`
-      SELECT v."id", v."videoId", v."faceId", v."readyAt"
-      FROM "Video" AS v
-      JOIN "Face" AS f ON f."id" = v."faceId"
-      WHERE v."workflowStatus" IN ('READY'::"WorkflowStatus", 'CONTENT_READY'::"WorkflowStatus")
-        AND v."approvalStatus" = 'APPROVED'::"ApprovalStatus"
-        AND v."readyAt" IS NOT NULL
-        AND f."active" = true
-        AND NOT EXISTS (SELECT 1 FROM "Schedule" s WHERE s."videoId" = v."id")
-        AND NOT EXISTS (SELECT 1 FROM "PostingHistory" p WHERE p."videoId" = v."id")
-        AND NOT EXISTS (
-          SELECT 1 FROM "PublishAttempt" p
-          WHERE p."videoId" = v."id"
-            AND p."status" IN ('CLAIMED'::"PublishAttemptStatus", 'CONTAINER_CREATED'::"PublishAttemptStatus", 'PROCESSING'::"PublishAttemptStatus", 'PUBLISH_REQUESTED'::"PublishAttemptStatus", 'RECONCILE_REQUIRED'::"PublishAttemptStatus", 'SUCCEEDED'::"PublishAttemptStatus")
-        )
-      ORDER BY v."readyAt" ASC, v."videoId" ASC
-      FOR UPDATE OF v SKIP LOCKED
-    `;
-      const selected = pickEligibleVideos(
+      const plan = planReadySlots(
         candidates,
-        history,
-        businessDate,
-        openHours.length,
+        schedules,
+        postingHistory,
+        startBusinessDate,
+        options.horizonDays,
+        now,
         gapDays,
       );
-      for (let index = 0; index < selected.length; index += 1) {
-        const candidate = selected[index]!;
-        const slotHour = openHours[index]!;
-        const scheduledAt = slotInstant(businessDate, slotHour);
+      const createdScheduleIds: string[] = [];
+      for (const { candidate, businessDate, slotHour, scheduledAt } of plan) {
         const jobId = `publish:${candidate.videoId}:${scheduledAt.toISOString()}`;
         const schedule = await tx.schedule.create({
           data: {
@@ -272,7 +139,11 @@ export async function selectDailyReels(db: PrismaClient, options: SelectDailyOpt
           },
         });
         const updated = await tx.video.updateMany({
-          where: { id: candidate.id, workflowStatus: { in: ['READY', 'CONTENT_READY'] }, approvalStatus: 'APPROVED' },
+          where: {
+            id: candidate.id,
+            workflowStatus: { in: ['READY', 'CONTENT_READY'] },
+            approvalStatus: 'APPROVED',
+          },
           data: { workflowStatus: 'SELECTED' },
         });
         if (updated.count !== 1)
@@ -293,7 +164,7 @@ export async function selectDailyReels(db: PrismaClient, options: SelectDailyOpt
         });
         await tx.auditLog.create({
           data: {
-            actorId,
+            actorId: options.actorId,
             action: 'VIDEO_SELECTED',
             entity: 'Schedule',
             entityId: schedule.id,
@@ -305,9 +176,30 @@ export async function selectDailyReels(db: PrismaClient, options: SelectDailyOpt
             },
           },
         });
+        createdScheduleIds.push(schedule.id);
       }
-      return tx.schedule.findMany({ where: { businessDate }, orderBy: { slotHour: 'asc' } });
+      return tx.schedule.findMany({
+        where: includeExisting
+          ? { businessDate: startBusinessDate }
+          : { id: { in: createdScheduleIds } },
+        orderBy: [{ businessDate: 'asc' }, { slotHour: 'asc' }],
+      });
     },
     { maxWait: 10_000, timeout: 30_000 },
+  );
+}
+
+/** Returns all reservations for the day, including those from previous runs. */
+export async function selectDailyReels(db: PrismaClient, options: SelectDailyOptions) {
+  return planSchedules(
+    db,
+    {
+      startBusinessDate: options.businessDate,
+      actorId: options.actorId,
+      horizonDays: 1,
+      gapDays: options.gapDays ?? 2,
+      ...(options.now ? { now: options.now } : {}),
+    },
+    true,
   );
 }

@@ -2,6 +2,12 @@ import { z } from 'zod';
 
 const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+/** Keep Redis clients recoverable while bounding reconnect pressure. */
+export function redisReconnectDelay(attempt: number): number {
+  const safeAttempt = Number.isFinite(attempt) ? Math.max(1, Math.trunc(attempt)) : 1;
+  return Math.min(safeAttempt * 200, 5_000);
+}
+
 function isIanaTimeZone(value: string): boolean {
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: value });
@@ -62,7 +68,7 @@ const envSchema = z.object({
   SLOT_2: z.string().regex(timePattern, 'Expected HH:mm').default('20:00'),
   REDIS_URL: z.preprocess(
     (value) => (typeof value === 'string' && !value.trim() ? undefined : value),
-    z.string().url().default('redis://127.0.0.1:6379'),
+    z.string().url().default('redis://127.0.0.1:6380'),
   ),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),

@@ -1,13 +1,8 @@
-import {
-  createDatabaseClient,
-  decideApproval,
-  assignFace,
-  setVideoTitle,
-  type PrismaClient,
-} from '@gcs/database';
-import { loadConfig } from '@gcs/config';
+import { registerOperations } from './operations.js';
+import { createDatabaseClient, assignFace, setVideoTitle, type PrismaClient } from '@gcs/database';
+import { loadConfig, redisReconnectDelay } from '@gcs/config';
 import { getGoogleAuthStatus, MetaGraphInstagramPublisher } from '@gcs/integrations';
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { Queue, type Job } from 'bullmq';
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import helmet from '@fastify/helmet';
@@ -146,7 +141,7 @@ function hasLocalAdminAccess(
     const secret = Buffer.from(expected);
     return supplied.length === secret.length && timingSafeEqual(supplied, secret);
   }
-  return true;
+  return env['NODE_ENV'] !== 'production' && isLoopback(request.ip);
 }
 
 function googleReadiness(env: NodeJS.ProcessEnv) {
@@ -197,15 +192,31 @@ function createApiQueue(name: string, redis: RedisClient): Queue {
   return queue;
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs = 3_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('OPERATION_TIMEOUT')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function safeQueueSnapshot(queue: GoogleSyncQueue): Promise<{
   counts: Record<string, number>;
   latest: Array<Pick<Job, 'id' | 'timestamp' | 'finishedOn' | 'processedOn'>>;
 }> {
   try {
-    const [counts, latest] = await Promise.all([
-      queue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
-      queue.getJobs(['completed', 'failed', 'active', 'waiting', 'delayed'], 0, 0, false),
-    ]);
+    const [counts, latest] = await withTimeout(
+      Promise.all([
+        queue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
+        queue.getJobs(['completed', 'failed', 'active', 'waiting', 'delayed'], 0, 0, false),
+      ]),
+    );
     return { counts, latest };
   } catch {
     return { counts: {}, latest: [] };
@@ -221,6 +232,51 @@ function businessDate(now: Date, timezone: string): string {
   }).formatToParts(now);
   const values = new Map(parts.map(({ type, value }) => [type, value]));
   return `${values.get('year')}-${values.get('month')}-${values.get('day')}`;
+}
+
+function revision(env: NodeJS.ProcessEnv): string | null {
+  const value = env['APP_REVISION'] || env['RENDER_GIT_COMMIT'] || env['RAILWAY_GIT_COMMIT_SHA'];
+  return value && /^[a-zA-Z0-9._-]{1,128}$/.test(value) ? value : null;
+}
+
+function workerHeartbeat(raw: string | null) {
+  const unavailable = {
+    status: 'unavailable',
+    revision: null,
+    startedAt: null,
+    observedAt: null,
+    queues: null,
+  };
+  if (!raw || raw.length > 2_000) return unavailable;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object') return unavailable;
+    const data = value as Record<string, unknown>;
+    if (
+      typeof data['startedAt'] !== 'string' ||
+      typeof data['observedAt'] !== 'string' ||
+      !Number.isFinite(Date.parse(data['startedAt'])) ||
+      !Number.isFinite(Date.parse(data['observedAt'])) ||
+      typeof data['queues'] !== 'number' ||
+      !Number.isInteger(data['queues']) ||
+      data['queues'] < 1 ||
+      data['queues'] > 100
+    )
+      return unavailable;
+    const age = Date.now() - Date.parse(data['observedAt']);
+    return {
+      status: age >= -5_000 && age <= 60_000 ? 'healthy' : 'stale',
+      revision:
+        typeof data['revision'] === 'string' && /^[a-zA-Z0-9._-]{1,128}$/.test(data['revision'])
+          ? data['revision']
+          : null,
+      startedAt: new Date(data['startedAt']).toISOString(),
+      observedAt: new Date(data['observedAt']).toISOString(),
+      queues: data['queues'],
+    };
+  } catch {
+    return unavailable;
+  }
 }
 
 async function probe(action: () => Promise<unknown>, timeoutMs = 2_500): Promise<boolean> {
@@ -253,7 +309,7 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
       connectTimeout: 2_000,
       commandTimeout: 2_000,
       maxRetriesPerRequest: 1,
-      retryStrategy: () => null,
+      retryStrategy: redisReconnectDelay,
     });
   const closeDependencies = deps.closeDependencies ?? true;
   const syncQueue = deps.googleSyncQueue ?? createApiQueue('sync-google', redis);
@@ -266,9 +322,25 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
       ]),
     );
   const app = Fastify({
-    logger: config.nodeEnv !== 'test',
+    logger:
+      config.nodeEnv !== 'test'
+        ? { redact: ['req.headers.authorization', 'req.headers.cookie'] }
+        : false,
     trustProxy: false,
     bodyLimit: 64 * 1024,
+  });
+
+  app.addHook('onRequest', async (request, reply) => {
+    if (request.url.startsWith('/api/v1/') && !hasLocalAdminAccess(request, env))
+      return reply.code(403).send({ error: 'Admin authentication required' });
+  });
+  app.setErrorHandler((error, _request, reply) => {
+    const statusCode =
+      error && typeof error === 'object' && 'statusCode' in error ? Number(error.statusCode) : 503;
+    const status = statusCode >= 400 && statusCode < 500 ? statusCode : 503;
+    return reply
+      .code(status)
+      .send({ error: status === 503 ? 'Operation unavailable' : 'Invalid request' });
   });
 
   await app.register(helmet, {
@@ -300,9 +372,9 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
 </head>
 <body>
   <div class="card">
-    <div class="status">&#9679; System Live</div>
+    <div class="status">API process online</div>
     <h1>Instagram Reels Automation</h1>
-    <p>Unified Engine (Fastify API, Automation Worker &amp; Queue) is running successfully on Render.</p>
+    <p>API liveness only. Check readiness and authenticated operations for dependency and workflow status.</p>
     <div class="links">
       <a href="/health">Health Check</a>
       <a href="/readiness">Readiness Status</a>
@@ -315,7 +387,28 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
 
   app.get('/health', async (_request, reply) => {
     reply.header('cache-control', 'no-store');
-    return { status: 'ok', service: 'api' };
+    return { status: 'ok', service: 'api', revision: revision(env) };
+  });
+
+  app.get('/api/v1/operations', async () => {
+    const [postgres, redisReady, rawHeartbeat] = await Promise.all([
+      probe(() => db.$queryRaw`SELECT 1`),
+      probe(async () => {
+        if ((await redis.ping()) !== 'PONG') throw new Error('Unavailable');
+      }),
+      withTimeout(redis.get('gcs:worker:heartbeat')).catch(() => null),
+    ]);
+    const worker = workerHeartbeat(rawHeartbeat);
+    return {
+      revision: revision(env),
+      status: postgres && redisReady && worker.status === 'healthy' ? 'healthy' : 'degraded',
+      dependencies: {
+        postgres: postgres ? 'ok' : 'unavailable',
+        redis: redisReady ? 'ok' : 'unavailable',
+      },
+      worker,
+      instagramWriteEnabled: false,
+    };
   });
 
   app.get('/readiness', async (_request, reply) => {
@@ -361,7 +454,7 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
       }),
       db.automationSetting.findUnique({
         where: { key: 'automation.enabled' },
-        select: { value: true, updatedAt: true },
+        select: { value: true, version: true, updatedAt: true },
       }),
       Promise.resolve(googleReadiness(env)),
       safeQueueSnapshot(syncQueue as unknown as GoogleSyncQueue),
@@ -421,6 +514,7 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
       timezone: config.timezone,
       automation: {
         enabled: setting?.value === true,
+        version: setting?.version ?? 0,
         updatedAt: setting?.updatedAt.toISOString() ?? null,
         source: setting ? 'database' : 'default_off',
       },
@@ -446,7 +540,7 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
       google,
       sync: {
         lastSync: safeJobState(syncSnapshot.latest[0]),
-        videosSeen: 0,
+        videosSeen: Object.values(byStatus).reduce((sum, value) => sum + value, 0),
         unmatchedThumbnails: unmatched,
         openConflicts,
         errors: syncSnapshot.counts['failed'] ?? 0,
@@ -492,61 +586,6 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     return integrationReadiness(env);
   });
 
-  app.get('/api/v1/integrations/gemini/models', async (request, reply) => {
-    const apiKey = env['GEMINI_API_KEY'];
-    if (!apiKey) return reply.code(400).send({ error: 'GEMINI_API_KEY is not configured' });
-    try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-      const data = await res.json();
-      reply.header('cache-control', 'no-store');
-      return data;
-    } catch (err) {
-      return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
-    }
-  });
-
-  app.get('/api/v1/integrations/gemini/test', async (request, reply) => {
-    const apiKey = env['GEMINI_API_KEY'];
-    if (!apiKey) return reply.code(400).send({ error: 'GEMINI_API_KEY is not configured' });
-    const modelsToTry = [
-      'gemini-3.8-flash',
-      'gemini-3.5-flash-lite',
-      'gemini-3.5-flash',
-      'gemini-3.7-flash',
-      'gemini-flash-latest',
-    ];
-    const results: Record<string, unknown> = {};
-    for (const model of modelsToTry) {
-      try {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-          {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
-            body: JSON.stringify({
-              contents: [
-                {
-                  role: 'user',
-                  parts: [{ text: 'Return valid JSON with keys: caption, hashtags, cta' }],
-                },
-              ],
-              generationConfig: {
-                responseMimeType: 'application/json',
-                temperature: 0.4,
-              },
-            }),
-          },
-        );
-        const data = await res.json();
-        results[model] = { status: res.status, ok: res.ok, data };
-      } catch (err) {
-        results[model] = { error: err instanceof Error ? err.message : String(err) };
-      }
-    }
-    reply.header('cache-control', 'no-store');
-    return results;
-  });
-
   app.get('/api/v1/integrations/meta/status', async (request, reply) => {
     if (!hasLocalAdminAccess(request, env))
       return reply.code(403).send({ error: 'Local admin access required' });
@@ -569,11 +608,13 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
         try {
           // BullMQ's scheduler getter creates an async promise that does not
           // propagate connection failures to this route. Check readiness first.
-          await queue.waitUntilReady?.();
-          const [counts, schedulers] = await Promise.all([
-            queue.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed'),
-            queue.getJobSchedulers?.(0, 20, true) ?? Promise.resolve([]),
-          ]);
+          if (queue.waitUntilReady) await withTimeout(queue.waitUntilReady());
+          const [counts, schedulers] = await withTimeout(
+            Promise.all([
+              queue.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed'),
+              queue.getJobSchedulers?.(0, 20, true) ?? Promise.resolve([]),
+            ]),
+          );
           return {
             name,
             available: true,
@@ -673,7 +714,7 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     };
   });
 
-    app.get('/api/v1/videos/:id/audit', async (request, reply) => {
+  app.get('/api/v1/videos/:id/audit', async (request, reply) => {
     const { id } = request.params as { id: string };
     if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
     const video = await db.video.findUnique({ where: { videoId: id }, select: { id: true } });
@@ -682,6 +723,14 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
       where: { entity: 'Video', entityId: video.id },
       orderBy: { createdAt: 'desc' },
       take: 20,
+      select: {
+        id: true,
+        actorId: true,
+        action: true,
+        entity: true,
+        entityId: true,
+        createdAt: true,
+      },
     });
     reply.header('cache-control', 'no-store');
     return { videoId: id, logs };
@@ -702,43 +751,67 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
     const video = await db.video.findUnique({
       where: { videoId: id },
-      select: { id: true, inputVersion: true, schedule: { select: { id: true } } },
+      select: {
+        id: true,
+        inputVersion: true,
+        approvalStatus: true,
+        workflowStatus: true,
+        content: { orderBy: { version: 'desc' }, take: 1, select: { id: true } },
+        schedule: {
+          select: {
+            id: true,
+            mediaAsset: { select: { status: true } },
+          },
+        },
+      },
     });
     if (!video) return reply.code(404).send({ error: 'Video not found' });
+    const allowedWorkflow =
+      ['SELECTED', 'CONTENT_READY', 'SCHEDULED'].includes(video.workflowStatus) ||
+      (operation === 'retry-content' && video.workflowStatus === 'FAILED');
+    if (video.approvalStatus !== 'APPROVED' || !allowedWorkflow)
+      return reply.code(409).send({
+        error:
+          'Operation requires an approved selected video outside active publishing or reconciliation',
+      });
     const contentOperation = ['generate', 'regenerate', 'retry-content'].includes(operation);
+    if (operation === 'regenerate' && !video.content[0])
+      return reply.code(409).send({ error: 'No generated content exists to regenerate' });
+    if (!contentOperation && (!video.schedule || !video.content[0]))
+      return reply.code(409).send({
+        error: 'Scheduled video and generated content are required before media preparation',
+      });
+    if (operation === 'retry-media' && video.schedule?.mediaAsset?.status !== 'FAILED')
+      return reply.code(409).send({ error: 'Media retry requires a failed media preparation' });
     const queueName = contentOperation ? 'generate-content' : 'prepare-media';
     const queue = phaseQueues[queueName];
     if (!queue) return reply.code(503).send({ error: 'Queue is unavailable' });
-    if (!contentOperation && !video.schedule)
-      return reply.code(409).send({ error: 'Video has no schedule to prepare' });
-    const uniqueAttempt =
-      operation === 'regenerate' ||
-      operation === 'retry-content' ||
-      operation === 'retry-media' ||
-      operation === 'generate';
-    const requestId = `${operation}-${id}-${Date.now()}`;
+    const uniqueAttempt = ['regenerate', 'retry-content', 'retry-media'].includes(operation);
+    const requestId = `${operation}-${id}-${randomUUID()}`;
     const jobId = uniqueAttempt
       ? requestId
-      : (contentOperation
+      : contentOperation
         ? `generate-${id}-v${video.inputVersion}`
-        : `prepare-${video.schedule?.id ?? id}`);
-    const job = await queue.add(
-      operation,
-      {
-        videoId: id,
-        ...(video.schedule ? { scheduleId: video.schedule.id } : {}),
-        requestedAt: new Date().toISOString(),
-        manual: true,
-        regenerate: operation === 'regenerate',
-        ...(requestId ? { requestId } : {}),
-      },
-      {
-        jobId,
-        attempts: contentOperation ? 4 : 3,
-        backoff: { type: 'exponential', delay: 1_000 },
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      },
+        : `prepare-${video.schedule?.id ?? id}`;
+    const job = await withTimeout(
+      queue.add(
+        operation,
+        {
+          videoId: id,
+          ...(video.schedule ? { scheduleId: video.schedule.id } : {}),
+          requestedAt: new Date().toISOString(),
+          manual: true,
+          regenerate: operation === 'regenerate',
+          ...(requestId ? { requestId } : {}),
+        },
+        {
+          jobId,
+          attempts: contentOperation ? 4 : 3,
+          backoff: { type: 'exponential', delay: 1_000 },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      ),
     );
     await db.auditLog.create({
       data: {
@@ -769,37 +842,23 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     enqueueVideoOperation(request, reply, 'retry-media'),
   );
 
-  app.post('/api/v1/videos/:id/approve', async (request, reply) => {
-    if (!hasLocalAdminAccess(request, env))
-      return reply.code(403).send({ error: 'Local admin access required' });
-    const { id } = request.params as { id: string };
-    if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
-    try {
-      const updated = await decideApproval(db, id, {
-        decision: 'APPROVED',
-        actorId: 'admin-dashboard',
-      });
-      reply.header('cache-control', 'no-store');
-      return { approved: true, video: updated };
-    } catch (err) {
-      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
-    }
-  });
-
   app.post('/api/v1/videos/:id/face', async (request, reply) => {
     if (!hasLocalAdminAccess(request, env))
       return reply.code(403).send({ error: 'Local admin access required' });
     const { id } = request.params as { id: string };
     if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
-    const body = (request.body as { faceName?: string } | undefined) ?? {};
-    const faceName = (body.faceName ?? '').trim();
+    const body = (request.body as { faceName?: unknown } | undefined) ?? {};
+    const faceName = typeof body.faceName === 'string' ? body.faceName.trim() : '';
+    if (faceName.length > 100) return reply.code(400).send({ error: 'faceName is too long' });
     if (!faceName) return reply.code(400).send({ error: 'faceName is required' });
     try {
       const updated = await assignFace(db, id, faceName, 'admin-dashboard');
       reply.header('cache-control', 'no-store');
       return { success: true, video: updated };
-    } catch (err) {
-      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    } catch {
+      return reply
+        .code(400)
+        .send({ error: 'Video command rejected; verify current state and inputs' });
     }
   });
 
@@ -808,15 +867,18 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
       return reply.code(403).send({ error: 'Local admin access required' });
     const { id } = request.params as { id: string };
     if (!videoIdPattern.test(id)) return reply.code(400).send({ error: 'Invalid Video ID' });
-    const body = (request.body as { title?: string } | undefined) ?? {};
-    const title = (body.title ?? '').trim();
+    const body = (request.body as { title?: unknown } | undefined) ?? {};
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    if (title.length > 500) return reply.code(400).send({ error: 'title is too long' });
     if (!title) return reply.code(400).send({ error: 'title is required' });
     try {
       const updated = await setVideoTitle(db, id, title, 'admin-dashboard');
       reply.header('cache-control', 'no-store');
       return { success: true, video: updated };
-    } catch (err) {
-      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    } catch {
+      return reply
+        .code(400)
+        .send({ error: 'Video command rejected; verify current state and inputs' });
     }
   });
 
@@ -901,6 +963,8 @@ export async function buildApp(deps: ApiDependencies = {}): Promise<FastifyInsta
     reply.header('cache-control', 'no-store');
     return { resolved: true };
   });
+
+  registerOperations(app, db, phaseQueues['select-daily-reels']);
 
   app.addHook('onClose', async () => {
     if (!closeDependencies) return;

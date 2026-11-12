@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { expectedMetaIdentity, loadConfig, settingsSchema } from './index.js';
+import { expectedMetaIdentity, loadConfig, redisReconnectDelay, settingsSchema } from './index.js';
 
 describe('configuration defaults', () => {
+  it('uses a bounded Redis reconnect policy', () => {
+    expect(redisReconnectDelay(1)).toBe(200);
+    expect(redisReconnectDelay(10)).toBe(2_000);
+    expect(redisReconnectDelay(100)).toBe(5_000);
+  });
+
   it('keeps automation off and uses the agreed India schedule', () => {
     expect(loadConfig({})).toMatchObject({
       automationEnabled: false,
@@ -92,8 +98,8 @@ describe('configuration defaults', () => {
   });
 
   it('defaults blank or whitespace REDIS_URL to local redis', () => {
-    expect(loadConfig({ REDIS_URL: '' }).redisUrl).toBe('redis://127.0.0.1:6379');
-    expect(loadConfig({ REDIS_URL: '   ' }).redisUrl).toBe('redis://127.0.0.1:6379');
+    expect(loadConfig({ REDIS_URL: '' }).redisUrl).toBe('redis://127.0.0.1:6380');
+    expect(loadConfig({ REDIS_URL: '   ' }).redisUrl).toBe('redis://127.0.0.1:6380');
   });
 
   it('retains the Instagram Login configuration path', () => {

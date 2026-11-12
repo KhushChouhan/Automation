@@ -1,86 +1,91 @@
+# Reliable scheduling requires paid always-on processes and persistent datastores.
+# Applying this Blueprint provisions billable resources; inspect plans before deployment.
 databases:
   - name: reels-postgres
     databaseName: reels_automation
     user: reels_user
-    plan: free
+    plan: 0.5c-1g
+    region: oregon
     ipAllowList: []
 
+envVarGroups:
+  - name: reels-runtime
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_TIMEZONE
+        value: Asia/Kolkata
+      - key: DAILY_REEL_LIMIT
+        value: '2'
+      - key: SAME_FACE_GAP_DAYS
+        value: '2'
+      - key: SLOT_1
+        value: '19:00'
+      - key: SLOT_2
+        value: '20:00'
+      - key: AUTOMATION_ENABLED
+        value: 'false'
+      - key: INSTAGRAM_PUBLISHING_ENABLED
+        value: 'false'
+      - key: GOOGLE_DRIVE_ARCHIVE_ENABLED
+        value: 'false'
+      - key: ADMIN_API_TOKEN
+        generateValue: true
+      - key: GOOGLE_SYNC_INTERVAL_MINUTES
+        value: '5'
+      # Add provider secrets and resource IDs to this shared secret group only
+      # when the corresponding integration is explicitly authorized.
+
 services:
-  # 100% Free Unified Web Service (Fastify API + Background Automation Worker in 1 Container)
+  - type: keyvalue
+    name: reels-redis
+    region: oregon
+    plan: 256mb
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+    ipAllowList: []
+
   - type: web
     name: reels-automation
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    plan: free
+    dockerCommand: node scripts/start.mjs api
+    preDeployCommand: node scripts/start.mjs migrate
+    plan: 0.5c-512mb
     region: oregon
     healthCheckPath: /health
     envVars:
+      - fromGroup: reels-runtime
       - key: PORT
-        value: 8000
-      - key: NODE_ENV
-        value: production
+        value: '8000'
       - key: DATABASE_URL
         fromDatabase:
           name: reels-postgres
           property: connectionString
-      # Enter free Redis URL (e.g. from free https://upstash.com)
       - key: REDIS_URL
-        sync: false
-      - key: APP_TIMEZONE
-        value: Asia/Kolkata
-      - key: DAILY_REEL_LIMIT
-        value: 2
-      - key: SAME_FACE_GAP_DAYS
-        value: 2
-      - key: SLOT_1
-        value: 19:00
-      - key: SLOT_2
-        value: 20:00
-      - key: AUTOMATION_ENABLED
-        sync: false
-      - key: CONTENT_GENERATOR_PROVIDER
-        value: gemini
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GEMINI_MODEL
-        value: gemini-3.6-flash
-      - key: MEDIA_STORAGE_PROVIDER
-        value: cloudinary
-      - key: CLOUDINARY_CLOUD_NAME
-        sync: false
-      - key: CLOUDINARY_API_KEY
-        sync: false
-      - key: CLOUDINARY_API_SECRET
-        sync: false
-      - key: META_AUTH_PATH
-        value: facebook_login
-      - key: META_PAGE_ACCESS_TOKEN
-        sync: false
-      - key: META_PAGE_ID
-        sync: false
-      - key: INSTAGRAM_ACCOUNT_ID
-        sync: false
-      - key: INSTAGRAM_PUBLISHING_ENABLED
-        sync: false
-      # Google Drive & Sheets Integration
-      - key: GOOGLE_AUTH_TYPE
-        value: oauth
-      - key: GOOGLE_CLIENT_ID
-        sync: false
-      - key: GOOGLE_CLIENT_SECRET
-        sync: false
-      - key: GOOGLE_REFRESH_TOKEN
-        sync: false
-      - key: GOOGLE_SHEET_ID
-        value: 1WjCyyb2F85K4fOkmznzRb1LRS_D9a6cXKtCOJzEcib0
-      - key: GOOGLE_VIDEO_FOLDER_ID
-        value: 1nOFmkDTEaUJhle1him3qUviFmmjQ2sr4
-      - key: GOOGLE_THUMBNAIL_FOLDER_ID
-        value: 1xBdlVwrppfo86dfCDr0ntf4eR6jEF4eW
-      - key: GOOGLE_ARCHIVE_FOLDER_ID
-        value: 1IfK_Hmrd3_xpxQbug5rU8cU6NiNQcJvR
-      - key: GOOGLE_DRIVE_ARCHIVE_ENABLED
-        value: "false"
-      - key: GOOGLE_SYNC_INTERVAL_MINUTES
-        value: "5"
+        fromService:
+          type: keyvalue
+          name: reels-redis
+          property: connectionString
+
+  - type: worker
+    name: reels-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: node scripts/start.mjs worker
+    preDeployCommand: node scripts/start.mjs migrate
+    plan: 0.5c-512mb
+    region: oregon
+    envVars:
+      - fromGroup: reels-runtime
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reels-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: reels-redis
+          property: connectionString

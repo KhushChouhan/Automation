@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PrismaClient } from '@gcs/database';
+import { decideApproval, PrismaClient } from '@gcs/database';
 import type {
   DriveChangePage,
   DriveVideoAsset,
@@ -125,22 +125,32 @@ describe('Google sync orchestration', () => {
       });
       expect(second.thumbnailsMatched).toBe(1);
       expect(second.sheetConflicts).toBe(0);
-      const ready = await db.video.findUniqueOrThrow({
+      const pendingApproval = await db.video.findUniqueOrThrow({
         where: { driveFileId },
         include: { thumbnail: true },
       });
-      expect(ready).toMatchObject({
+      expect(pendingApproval).toMatchObject({
         id: video.id,
         videoId: video.videoId,
         title: 'Human controlled title',
         faceId: face.id,
-        approvalStatus: 'APPROVED',
-        workflowStatus: 'READY',
+        approvalStatus: 'PENDING',
+        workflowStatus: 'WAITING_APPROVAL',
       });
-      expect(ready.thumbnail?.driveFileId).toBe(thumbnailFileId);
+      expect(pendingApproval.thumbnail?.driveFileId).toBe(thumbnailFileId);
       expect(sheet.mirrored.at(-1)?.find((row) => row.videoId === video.videoId)).toMatchObject({
         videoId: video.videoId,
-        status: 'READY',
+        approvalStatus: 'PENDING',
+        status: 'WAITING_APPROVAL',
+      });
+      await decideApproval(db, video.videoId, {
+        decision: 'APPROVED',
+        actorId: 'dashboard-approver-test',
+        expectedInputVersion: pendingApproval.inputVersion,
+      });
+      expect(await db.video.findUniqueOrThrow({ where: { driveFileId } })).toMatchObject({
+        approvalStatus: 'APPROVED',
+        workflowStatus: 'READY',
       });
       expect(
         await db.syncCursor.findUnique({

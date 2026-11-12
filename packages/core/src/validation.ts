@@ -8,6 +8,7 @@ export const titleSchema = z.string().trim().min(1).max(180);
 export const faceNameSchema = z.string().trim().min(1).max(120);
 export const approvalCommandSchema = z
   .object({
+    expectedInputVersion: z.number().int().positive().optional(),
     decision: z.enum(approvalStatuses).refine((value) => value !== 'PENDING'),
     actorId: z.string().trim().min(1).max(120),
     reason: z.string().trim().max(1000).optional(),

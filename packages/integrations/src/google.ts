@@ -590,6 +590,7 @@ export class GoogleSheetsV4Adapter implements GoogleSheetsAdapter {
           : [{ range: `Videos!A${sheetRow}:A${sheetRow}`, values: [[row.videoId]] }]),
         { range: `Videos!C${sheetRow}:C${sheetRow}`, values: [[row.videoLink ?? '']] },
         { range: `Videos!E${sheetRow}:E${sheetRow}`, values: [[row.thumbnailLink ?? '']] },
+        { range: `Videos!F${sheetRow}:F${sheetRow}`, values: [[row.approvalStatus ?? '']] },
         { range: `Videos!G${sheetRow}:Q${sheetRow}`, values: [managedValues[0]!.slice(0, 11)] },
       ];
     });

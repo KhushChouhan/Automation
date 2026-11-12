@@ -20,6 +20,7 @@ export default tseslint.config(
   {
     ...tseslint.configs.disableTypeChecked,
     files: ['**/*.{js,mjs,cjs}'],
+    languageOptions: { globals: globals.node },
   },
   {
     files: ['**/*.{ts,tsx}'],
@@ -36,5 +37,9 @@ export default tseslint.config(
   {
     files: ['apps/admin/**/*.{ts,tsx}'],
     languageOptions: { globals: { ...globals.browser, ...globals.node } },
+  },
+  {
+    ...tseslint.configs.disableTypeChecked,
+    files: ['**/*.config.ts'],
   },
 );

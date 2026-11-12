@@ -1,3 +1,4 @@
+import { deriveVideoReadiness } from '@gcs/core';
 import { randomUUID } from 'node:crypto';
 import type { Prisma, PrismaClient, PublishAttempt } from '@prisma/client';
 
@@ -87,102 +88,111 @@ export async function claimScheduledPublish(
 ): Promise<PublishClaim> {
   requireActor(input.actorId);
   const now = input.now ?? new Date();
-  return db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT "id" FROM "Schedule" WHERE "id" = ${input.scheduleId} FOR UPDATE`;
-    const schedule = await tx.schedule.findUniqueOrThrow({
-      where: { id: input.scheduleId },
-      include: {
-        video: {
-          include: { postingHistory: true, content: { orderBy: { version: 'desc' }, take: 1 } },
+  return db.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Schedule" WHERE "id" = ${input.scheduleId} FOR UPDATE`;
+      const schedule = await tx.schedule.findUniqueOrThrow({
+        where: { id: input.scheduleId },
+        include: {
+          video: {
+            include: {
+              face: true,
+              thumbnail: true,
+              postingHistory: true,
+              content: { orderBy: { version: 'desc' }, take: 1 },
+            },
+          },
+          mediaAsset: true,
         },
-        mediaAsset: true,
-      },
-    });
-    const existing = await tx.publishAttempt.findFirst({
-      where: { scheduleId: schedule.id },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (
-      schedule.video.postingHistory ||
-      schedule.status === 'POSTED' ||
-      schedule.video.workflowStatus === 'POSTED'
-    )
-      return { kind: 'POSTED', attempt: existing };
-    if (existing) {
-      if (existing.status === 'SUCCEEDED')
-        return {
-          kind: 'RECONCILE_REQUIRED',
-          attempt: await flagForReconciliation(
-            tx,
-            existing,
-            input.actorId,
-            'SUCCESS_WITHOUT_POSTING_HISTORY',
-          ),
-        };
-      if (existing.status === 'RECONCILE_REQUIRED')
-        return { kind: 'RECONCILE_REQUIRED', attempt: existing };
-      if (existing.leaseExpiresAt && existing.leaseExpiresAt > now)
-        return { kind: 'BUSY', attempt: existing };
-      if (
-        existing.status === 'PUBLISH_REQUESTED' ||
-        existing.mediaId ||
-        (existing.status === 'CLAIMED' && existing.containerRequestedAt)
-      )
-        return {
-          kind: 'RECONCILE_REQUIRED',
-          attempt: await flagForReconciliation(
-            tx,
-            existing,
-            input.actorId,
-            existing.containerRequestedAt && !existing.containerId
-              ? 'CONTAINER_CREATE_OUTCOME_UNCERTAIN'
-              : 'PUBLISH_OUTCOME_UNCERTAIN',
-          ),
-        };
-      if (existing.status === 'FAILED')
-        throw new Error('Failed publish attempt requires an explicit safe retry decision');
-      const leaseToken = randomUUID();
-      const attempt = await tx.publishAttempt.update({
-        where: { id: existing.id },
-        data: { leaseToken, leaseExpiresAt: new Date(now.getTime() + LEASE_MS) },
       });
-      return { kind: 'RESUMED', attempt, leaseToken };
-    }
-    if (now < schedule.scheduledAt) throw new Error('Scheduled publish slot has not arrived');
-    if (schedule.status !== 'SCHEDULED' || schedule.video.workflowStatus !== 'SCHEDULED')
-      throw new Error('Publish claim requires a scheduled video');
-    if (schedule.video.approvalStatus !== 'APPROVED' || !schedule.video.content[0])
-      throw new Error('Publish claim requires approved generated content');
-    // READY describes the durable stored asset. A previous signed delivery URL
-    // may expire before the slot; the worker obtains a fresh URL just in time.
-    if (schedule.mediaAsset?.status !== 'READY')
-      throw new Error('Prepared media asset is missing or not ready');
-    const leaseToken = randomUUID();
-    const attempt = await tx.publishAttempt.create({
-      data: {
-        videoId: schedule.videoId,
-        scheduleId: schedule.id,
-        idempotencyKey: `publish:${schedule.id}`,
-        leaseToken,
-        leaseExpiresAt: new Date(now.getTime() + LEASE_MS),
-      },
-    });
-    await tx.schedule.update({ where: { id: schedule.id }, data: { status: 'PUBLISHING' } });
-    await tx.video.update({
-      where: { id: schedule.videoId },
-      data: { workflowStatus: 'PUBLISHING' },
-    });
-    await tx.auditLog.create({
-      data: {
-        actorId: input.actorId,
-        action: 'PUBLISH_CLAIMED',
-        entity: 'PublishAttempt',
-        entityId: attempt.id,
-        after: { scheduleId: schedule.id, videoId: schedule.video.videoId },
-      },
-    });
-    return { kind: 'CLAIMED', attempt, leaseToken };
-  });
+      const existing = await tx.publishAttempt.findFirst({
+        where: { scheduleId: schedule.id },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (
+        schedule.video.postingHistory ||
+        schedule.status === 'POSTED' ||
+        schedule.video.workflowStatus === 'POSTED'
+      )
+        return { kind: 'POSTED', attempt: existing };
+      if (existing) {
+        if (existing.status === 'SUCCEEDED')
+          return {
+            kind: 'RECONCILE_REQUIRED',
+            attempt: await flagForReconciliation(
+              tx,
+              existing,
+              input.actorId,
+              'SUCCESS_WITHOUT_POSTING_HISTORY',
+            ),
+          };
+        if (existing.status === 'RECONCILE_REQUIRED')
+          return { kind: 'RECONCILE_REQUIRED', attempt: existing };
+        if (existing.leaseExpiresAt && existing.leaseExpiresAt > now)
+          return { kind: 'BUSY', attempt: existing };
+        if (
+          existing.status === 'PUBLISH_REQUESTED' ||
+          existing.mediaId ||
+          (existing.status === 'CLAIMED' && existing.containerRequestedAt)
+        )
+          return {
+            kind: 'RECONCILE_REQUIRED',
+            attempt: await flagForReconciliation(
+              tx,
+              existing,
+              input.actorId,
+              existing.containerRequestedAt && !existing.containerId
+                ? 'CONTAINER_CREATE_OUTCOME_UNCERTAIN'
+                : 'PUBLISH_OUTCOME_UNCERTAIN',
+            ),
+          };
+        if (existing.status === 'FAILED')
+          throw new Error('Failed publish attempt requires an explicit safe retry decision');
+      }
+      if (now < schedule.scheduledAt) throw new Error('Scheduled publish slot has not arrived');
+      const expectedStatus = existing ? 'PUBLISHING' : 'SCHEDULED';
+      if (schedule.status !== expectedStatus || schedule.video.workflowStatus !== expectedStatus)
+        throw new Error('Publish claim requires a scheduled video in the expected workflow state');
+      if (deriveVideoReadiness(schedule.video) !== 'READY' || !schedule.video.content[0])
+        throw new Error('Publish claim requires approved generated content');
+      if (schedule.mediaAsset?.status !== 'READY')
+        throw new Error('Prepared media asset is missing or not ready');
+      if (existing) {
+        const leaseToken = randomUUID();
+        const attempt = await tx.publishAttempt.update({
+          where: { id: existing.id },
+          data: { leaseToken, leaseExpiresAt: new Date(now.getTime() + LEASE_MS) },
+        });
+        return { kind: 'RESUMED', attempt, leaseToken };
+      }
+      const leaseToken = randomUUID();
+      const attempt = await tx.publishAttempt.create({
+        data: {
+          videoId: schedule.videoId,
+          scheduleId: schedule.id,
+          idempotencyKey: `publish:${schedule.id}`,
+          leaseToken,
+          leaseExpiresAt: new Date(now.getTime() + LEASE_MS),
+        },
+      });
+      await tx.schedule.update({ where: { id: schedule.id }, data: { status: 'PUBLISHING' } });
+      await tx.video.update({
+        where: { id: schedule.videoId },
+        data: { workflowStatus: 'PUBLISHING' },
+      });
+      await tx.auditLog.create({
+        data: {
+          actorId: input.actorId,
+          action: 'PUBLISH_CLAIMED',
+          entity: 'PublishAttempt',
+          entityId: attempt.id,
+          after: { scheduleId: schedule.id, videoId: schedule.video.videoId },
+        },
+      });
+      return { kind: 'CLAIMED', attempt, leaseToken };
+    },
+    { maxWait: 10_000, timeout: 15_000 },
+  );
 }
 
 /** Commit before create-container. A repeated call never authorizes another create. */

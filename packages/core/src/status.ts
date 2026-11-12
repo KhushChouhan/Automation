@@ -17,6 +17,18 @@ export const workflowStatuses = [
 
 export type WorkflowStatus = (typeof workflowStatuses)[number];
 
+/** Only idle, pre-selection records may accept human input or a decision. */
+export function acceptsWorkflowInput(status: WorkflowStatus): boolean {
+  return status.startsWith('WAITING_') || status === 'READY' || status === 'CONTENT_READY';
+}
+
+export function hasSeparateThumbnail(
+  sourceId: string | null,
+  thumbnailId: string | null | undefined,
+): boolean {
+  return Boolean(thumbnailId?.trim() && thumbnailId.trim() !== sourceId?.trim());
+}
+
 export const approvalStatuses = ['PENDING', 'APPROVED', 'REJECTED', 'CHANGES_REQUIRED'] as const;
 
 export type ApprovalStatus = (typeof approvalStatuses)[number];
@@ -89,4 +101,22 @@ export function deriveWorkflowStatus(input: ReadinessInput): WorkflowStatus {
   if (!input.hasThumbnail) return 'WAITING_THUMBNAIL';
   if (input.approvalStatus !== 'APPROVED') return 'WAITING_APPROVAL';
   return 'READY';
+}
+
+/** Resolve the readiness of a discovered video from its current independent assets. */
+export function deriveVideoReadiness(video: {
+  driveFileId: string | null;
+  face: { active: boolean } | null;
+  faceId: string | null;
+  title: string | null;
+  thumbnail: { driveFileId: string | null } | null;
+  approvalStatus: ApprovalStatus;
+}): WorkflowStatus {
+  return deriveWorkflowStatus({
+    hasVideo: Boolean(video.driveFileId?.trim()),
+    faceId: video.face?.active ? video.faceId : null,
+    title: video.title,
+    hasThumbnail: hasSeparateThumbnail(video.driveFileId, video.thumbnail?.driveFileId),
+    approvalStatus: video.approvalStatus,
+  });
 }

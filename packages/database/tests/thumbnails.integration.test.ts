@@ -88,6 +88,23 @@ describe('Drive thumbnail matching invariants', () => {
         'qa-test',
       );
       expect(second.attached).toEqual([]);
+      const beforeEdit = await client.video.update({
+        where: { videoId: attachedId },
+        data: { approvalStatus: 'APPROVED', readyAt: new Date() },
+      });
+      const revised = {
+        fileId: attachedFileId,
+        name: `${attachedId}_cover.jpg`,
+        checksum: 'updated-checksum',
+      };
+      expect((await reconcile(client, [revised], 'qa-test')).attached).toEqual([attachedFileId]);
+      const afterEdit = await client.video.findUniqueOrThrow({ where: { videoId: attachedId } });
+      expect(afterEdit).toMatchObject({
+        approvalStatus: 'PENDING',
+        readyAt: null,
+        inputVersion: beforeEdit.inputVersion + 1,
+      });
+      expect((await reconcile(client, [revised], 'qa-test')).attached).toEqual([]);
       expect(await client.thumbnail.count({ where: { driveFileId: attachedFileId } })).toBe(1);
       expect(
         await client.unmatchedThumbnail.count({ where: { driveFileId: { in: driveFileIds } } }),

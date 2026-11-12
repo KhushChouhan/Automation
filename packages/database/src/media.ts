@@ -1,3 +1,4 @@
+import { deriveVideoReadiness } from '@gcs/core';
 import type { PrismaClient } from '@prisma/client';
 
 export function mediaObjectKeys(videoId: string, scheduleId: string) {
@@ -15,19 +16,35 @@ export async function beginMediaPreparation(
     const video = await tx.video.findUniqueOrThrow({
       where: { videoId: input.videoId },
       include: {
+        face: true,
         schedule: true,
         thumbnail: true,
         content: { orderBy: { version: 'desc' }, take: 1 },
       },
     });
-    if (!video.schedule || !video.driveFileId || !video.content[0])
+    if (
+      !video.schedule ||
+      !video.driveFileId ||
+      !video.content[0] ||
+      deriveVideoReadiness(video) !== 'READY'
+    )
       throw new Error('Scheduled video, source Drive file and generated content are required');
     if (!['CONTENT_READY', 'SCHEDULED'].includes(video.workflowStatus))
       throw new Error(`Media preparation is not allowed from ${video.workflowStatus}`);
     const keys = mediaObjectKeys(video.videoId, video.schedule.id);
     const existing = await tx.mediaAsset.findUnique({ where: { scheduleId: video.schedule.id } });
-    if (existing?.status === 'READY')
+    if (existing?.status === 'READY') {
+      if (!['SELECTED', 'SCHEDULED'].includes(video.schedule.status))
+        throw new Error('Schedule is no longer awaiting media');
+      if (video.workflowStatus === 'CONTENT_READY') {
+        await tx.schedule.update({
+          where: { id: video.schedule.id },
+          data: { status: 'SCHEDULED' },
+        });
+        await tx.video.update({ where: { id: video.id }, data: { workflowStatus: 'SCHEDULED' } });
+      }
       return { reused: true as const, asset: existing, video, keys };
+    }
     const asset = await tx.mediaAsset.upsert({
       where: { scheduleId: video.schedule.id },
       create: {
@@ -76,6 +93,18 @@ export async function completeMediaPreparation(
   },
 ) {
   return db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Schedule" WHERE "id" = ${input.scheduleId} FOR UPDATE`;
+    const current = await tx.schedule.findUniqueOrThrow({
+      where: { id: input.scheduleId },
+      include: { video: true, mediaAsset: true },
+    });
+    if (current.mediaAsset?.status === 'READY') return current.mediaAsset;
+    if (
+      current.mediaAsset?.status !== 'PREPARING' ||
+      !['SELECTED', 'SCHEDULED'].includes(current.status) ||
+      !['CONTENT_READY', 'SCHEDULED'].includes(current.video.workflowStatus)
+    )
+      throw new Error('Media preparation is no longer active');
     const asset = await tx.mediaAsset.update({
       where: { scheduleId: input.scheduleId },
       data: {
@@ -126,9 +155,13 @@ export async function failMediaPreparation(
   input: { scheduleId: string; errorCode: string; actorId: string },
 ): Promise<void> {
   await db.$transaction(async (tx) => {
-    const asset = await tx.mediaAsset.update({
-      where: { scheduleId: input.scheduleId },
+    const updated = await tx.mediaAsset.updateMany({
+      where: { scheduleId: input.scheduleId, status: 'PREPARING' },
       data: { status: 'FAILED', lastError: input.errorCode },
+    });
+    if (!updated.count) return;
+    const asset = await tx.mediaAsset.findUniqueOrThrow({
+      where: { scheduleId: input.scheduleId },
     });
     await tx.auditLog.create({
       data: {

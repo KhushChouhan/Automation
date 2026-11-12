@@ -9,7 +9,8 @@ import {
 
 describe('Sheet/domain ownership', () => {
   it('keeps a small explicit human input allowlist', () => {
-    expect(sheetHumanFields).toEqual(['title', 'faceId', 'approvalStatus']);
+    expect(sheetHumanFields).toEqual(['title', 'faceId']);
+    expect(sheetMirrorFields).toContain('approvalStatus');
     expect(sheetMirrorFields).toContain('instagramMediaId');
     expect(sheetMirrorFields).toContain('workflowStatus');
     expect(sheetCommandValue('   ')).toBeUndefined();
@@ -22,7 +23,8 @@ describe('Sheet/domain ownership', () => {
   it('rejects unsafe runtime setting changes in Phase 2', () => {
     expect(validateAutomationSetting('business.timezone', 'Asia/Kolkata')).toBe('Asia/Kolkata');
     expect(() => validateAutomationSetting('business.timezone', 'Mars/Olympus')).toThrow();
-    expect(() => validateAutomationSetting('automation.enabled', true)).toThrow();
+    expect(validateAutomationSetting('automation.enabled', true)).toBe(true);
+    expect(validateAutomationSetting('automation.enabled', false)).toBe(false);
     expect(() => validateAutomationSetting('daily.limit', 3)).toThrow();
     expect(() => validateAutomationSetting('schedule.slots', ['18:00', '20:00'])).toThrow();
   });

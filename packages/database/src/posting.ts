@@ -16,6 +16,8 @@ export async function recordSuccessfulPost(db: PrismaClient, input: SuccessfulPo
   if (!input.instagramMediaId.trim()) throw new Error('instagramMediaId is required');
   const businessDate = businessDateOf(input.postedAt);
   return db.$transaction(async (tx) => {
+    // Serialize with claim/recovery before reading the attempt or terminal history.
+    await tx.$queryRaw`SELECT "id" FROM "PublishAttempt" WHERE "id" = ${input.publishAttemptId} FOR UPDATE`;
     await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${input.videoId} FOR UPDATE`;
     const video = await tx.video.findUniqueOrThrow({
       where: { videoId: input.videoId },
@@ -43,7 +45,7 @@ export async function recordSuccessfulPost(db: PrismaClient, input: SuccessfulPo
     const post = await tx.postingHistory.create({
       data: {
         videoId: video.id,
-        faceId: video.faceId,
+        faceId: video.schedule.faceId,
         instagramMediaId: input.instagramMediaId,
         permalink: input.permalink ?? null,
         businessDate,

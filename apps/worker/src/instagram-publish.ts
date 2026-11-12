@@ -119,6 +119,11 @@ export function createInstagramPublishProcessors(
     dependencies.publisher ??
     new MetaGraphInstagramPublisher({
       graphApiVersion: config.meta.graphApiVersion,
+      authPath: config.meta.authPath,
+      pageId: config.meta.pageId,
+      pageAccessToken: config.meta.pageAccessToken,
+      timeoutMs: config.meta.timeoutMs,
+      tokenExpiresAt: config.meta.tokenExpiresAt,
       accessToken: config.meta.accessToken,
       instagramAccountId: config.meta.instagramAccountId,
       publishingEnabled: config.meta.publishingEnabled,

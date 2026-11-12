@@ -51,6 +51,7 @@ describe('publish claim and reconciliation persistence', () => {
         videoId: `GCS-${tag.replaceAll('-', '').slice(0, 12).toUpperCase()}`,
         driveFileId: `qa-publish-drive-${tag}`,
         title: 'Prepared reel',
+        thumbnail: { create: { driveFileId: `qa-cover-${tag}` } },
         faceId,
         workflowStatus: 'SCHEDULED',
         approvalStatus: 'APPROVED',
@@ -123,6 +124,7 @@ describe('publish claim and reconciliation persistence', () => {
     }
     if (videoRowId) {
       await db.content.deleteMany({ where: { videoId: videoRowId } });
+      await db.thumbnail.deleteMany({ where: { videoId: videoRowId } });
       await db.video.delete({ where: { id: videoRowId } });
     }
     if (faceId) await db.face.delete({ where: { id: faceId } });
@@ -268,6 +270,13 @@ describe('publish claim and reconciliation persistence', () => {
         },
       });
       resumeAttemptId = attempt.id;
+      await expect(
+        claim(client, {
+          scheduleId: schedule.id,
+          actorId: 'qa-worker',
+          now: new Date(schedule.scheduledAt.getTime() - 1),
+        }),
+      ).rejects.toThrow('slot has not arrived');
       const recovered = await recoverStale(client, { actorId: 'qa-recovery' });
       expect(recovered.resume).toContain(attempt.id);
       expect(await client.publishAttempt.count({ where: { scheduleId: schedule.id } })).toBe(1);

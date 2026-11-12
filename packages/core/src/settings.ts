@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const settingSchemas = {
-  'automation.enabled': z.literal(false),
+  'automation.enabled': z.boolean(),
   'face.rotationGapDays': z.literal(2),
   'daily.limit': z.literal(2),
   'business.timezone': z.literal('Asia/Kolkata'),
@@ -10,7 +10,7 @@ const settingSchemas = {
 
 export type AutomationSettingKey = keyof typeof settingSchemas;
 
-/** Phase 2 accepts the fixed, disabled production policy from the blueprint. */
+/** Values remain typed; production defaults are enforced by configuration and deployment. */
 export function validateAutomationSetting(key: string, value: unknown): unknown {
   const schema = settingSchemas[key as AutomationSettingKey];
   if (!schema) throw new Error(`Unknown automation setting: ${key}`);

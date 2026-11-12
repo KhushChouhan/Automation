@@ -2,6 +2,11 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import {
+  actionAvailability,
+  type WorkflowAction,
+  type WorkflowControlState,
+} from './workflow-control-state';
 
 const actions = [
   ['generate', 'Generate Content'],
@@ -11,27 +16,25 @@ const actions = [
   ['retry-media', 'Retry Media'],
 ] as const;
 
-export function WorkflowControls({ videoId }: { videoId: string }) {
+export function WorkflowControls(props: WorkflowControlState) {
   const router = useRouter();
-  const [running, setRunning] = useState<string | null>(null);
+  const [running, setRunning] = useState<WorkflowAction | null>(null);
   const [message, setMessage] = useState('');
 
-  async function run(action: (typeof actions)[number][0]) {
+  async function run(action: WorkflowAction) {
     setRunning(action);
     setMessage('');
     try {
       const response = await fetch('/api/operations', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ videoId, action }),
+        body: JSON.stringify({ videoId: props.videoId, action }),
+        signal: AbortSignal.timeout(15_000),
       });
       const result = (await response.json()) as { queued?: boolean; error?: string };
       if (response.ok && result.queued) {
-        setMessage('Queued! Refreshing…');
-        setTimeout(() => {
-          router.refresh();
-          setMessage('Queued');
-        }, 2500);
+        setMessage(`${actions.find(([name]) => name === action)?.[1] ?? 'Operation'} queued.`);
+        setTimeout(() => router.refresh(), 2_500);
       } else {
         setMessage(result.error ?? 'Request failed');
       }
@@ -45,18 +48,22 @@ export function WorkflowControls({ videoId }: { videoId: string }) {
   return (
     <div className="workflow-controls">
       <div>
-        {actions.map(([action, label]) => (
-          <button
-            key={action}
-            type="button"
-            disabled={running !== null}
-            onClick={() => void run(action)}
-          >
-            {running === action ? 'Queueing…' : label}
-          </button>
-        ))}
+        {actions.map(([action, label]) => {
+          const availability = actionAvailability(action, props);
+          return (
+            <button
+              key={action}
+              type="button"
+              disabled={running !== null || !availability.enabled}
+              title={availability.reason || label}
+              onClick={() => void run(action)}
+            >
+              {running === action ? 'Queueing…' : label}
+            </button>
+          );
+        })}
       </div>
-      <span aria-live="polite" style={{ fontSize: '0.85rem', fontWeight: 500 }}>
+      <span aria-live="polite" className="control-message">
         {message}
       </span>
     </div>

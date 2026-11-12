@@ -1,60 +1,28 @@
 # Local setup
 
-## Requirements
-
-- Node.js 22 or later
-- pnpm 11.25 or later
-- Docker Desktop or Docker Engine with Compose
-
-## Start local services
-
-Copy `.env.example` to `.env`, then start the database and queue services:
+Use Node.js 22+, pnpm 11.25+, and Docker Compose. Copy `.env.example` to ignored `.env`, fill a private `ADMIN_API_TOKEN` and independent `DASHBOARD_PASSWORD`, then install and build. Never overwrite an existing environment containing credentials.
 
 ```powershell
-Copy-Item .env.example .env
-docker compose up -d
-pnpm install
+pnpm install --frozen-lockfile
 pnpm db:generate
+docker compose up -d
 pnpm db:migrate
 pnpm db:seed
+pnpm build
 ```
 
-The Compose file binds PostgreSQL and Redis to loopback only. Its development database password is `postgres`; change it with `POSTGRES_PASSWORD` before using the services outside a local development machine.
+These commands target the explicitly configured local database. Seeding writes fixture videos and today's two schedules; do not seed an existing production database. PostgreSQL binds to loopback port 5432; Redis 7 binds to port 6380 to avoid legacy Redis 3 on 6379. Keep `REDIS_URL=redis://127.0.0.1:6380` consistent in every local process. Use this one Compose Redis or an existing verified Redis 7/8, not both.
 
-## Run the dashboard and API
-
-Use separate terminals:
+Run separate terminals after building:
 
 ```powershell
-pnpm --filter @gcs/api dev
+pnpm start:api
+pnpm start:worker
+pnpm start:admin
 ```
 
-```powershell
-pnpm --filter @gcs/admin dev
-```
+Open `http://localhost:3000`. The admin fetches server-side `API_BASE_URL=http://127.0.0.1:8000` and forwards the private token. Dashboard browser access requires its separate username/password. `/health` and `/readiness` are safe public health probes; operational data and mutation routes require the API token. Provider status checks report presence/readiness without exposing secret values. Publishing and automation default OFF.
 
-```powershell
-pnpm --filter @gcs/worker start
-```
+Optional Google configuration belongs in ignored local environment or a deployment secret store. For OAuth supply `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_SHEET_ID`, `GOOGLE_VIDEO_FOLDER_ID`, and `GOOGLE_THUMBNAIL_FOLDER_ID`. Service-account mode uses `GOOGLE_SERVICE_ACCOUNT_JSON`. Archive folder configuration is required only if archiving is explicitly enabled. Provider credentials authorize real provider work: leave them blank for fake-only QA. Do not commit or print secrets.
 
-Open `http://localhost:3000`. The server-rendered admin fetches `API_BASE_URL` (default `http://127.0.0.1:3001`). API liveness and backing-service readiness are `/health` and `/readiness`; Google integration readiness is separate at `/api/v1/integrations/google/status`. Dashboard data is at `/api/v1/dashboard`.
-
-## Google local configuration
-
-Set Google values only in the ignored local `.env` file. The example intentionally leaves credentials and IDs blank. Choose OAuth (`GOOGLE_AUTH_TYPE=oauth`) and set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN`, or choose `service_account` and set `GOOGLE_SERVICE_ACCOUNT_JSON`. Provide `GOOGLE_SHEET_ID`, `GOOGLE_VIDEO_FOLDER_ID`, and `GOOGLE_THUMBNAIL_FOLDER_ID`; `GOOGLE_ARCHIVE_FOLDER_ID` is required only when `GOOGLE_DRIVE_ARCHIVE_ENABLED=true`. The status endpoint and dashboard show credential presence and configured resource IDs, never credential values.
-
-`POST /api/v1/sync/google` queues a sync job and does not itself claim Google data was read. The dashboard's **Run Sync** button uses the same local endpoint. Mutation endpoints accept loopback requests only; optionally set `ADMIN_API_TOKEN` to require a bearer token as well. Keep both API and admin bound to loopback and do not expose either to an untrusted network. `GET /api/v1/sync/google/status` reports queue state, and `GET /api/v1/sync/conflicts` lists up to 100 conflict summaries. Resolve an open conflict with `POST /api/v1/sync/conflicts/{id}/resolve`; this marks it resolved and does not alter either source value.
-
-Google readiness does not affect `/readiness`, which reports only PostgreSQL and Redis availability. No Google call is made just to check readiness. Never commit `.env`, credentials, tokens, or service-account JSON; rotate a credential if it is exposed. Production publishing remains disabled.
-
-The seed creates five videos and atomically fills today's 19:00 and 20:00 slots to demonstrate the face-rotation rule.
-
-The admin is intended for local development and has no user accounts or role model. Loopback binding is the default boundary; `ADMIN_API_TOKEN` adds a bearer check to API mutations. Production automation remains disabled by default.
-
-## Stop local services
-
-```powershell
-docker compose down
-```
-
-Use `docker compose down -v` only when you intentionally want to delete the local PostgreSQL and Redis data volumes.
+Stop local services with `docker compose down`. Adding `-v` deletes the local PostgreSQL/Redis volumes and must be intentional. For Render, Railway, Vercel and managed data services, follow [deployment and recovery](deployment.md).

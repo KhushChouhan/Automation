@@ -1,9 +1,51 @@
 import { createHash } from 'node:crypto';
-import { normalizeGeneratedContent, type ContentGenerationResult } from '@gcs/core';
+import {
+  deriveVideoReadiness,
+  normalizeGeneratedContent,
+  type ContentGenerationResult,
+} from '@gcs/core';
 import { Prisma, type PrismaClient } from '@prisma/client';
 
 function generationFingerprint(parts: readonly unknown[]): string {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+}
+
+/** Match callbacks to the last generation started under the video's row lock. */
+async function isCurrentGeneration(tx: Prisma.TransactionClient, videoId: string, key: string) {
+  const started = await tx.auditLog.findFirst({
+    where: {
+      entity: 'Video',
+      entityId: videoId,
+      action: { in: ['CONTENT_GENERATION_STARTED', 'CONTENT_REGENERATION_STARTED'] },
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { after: true },
+  });
+  const after = started?.after;
+  if (!after || typeof after !== 'object' || Array.isArray(after)) return false;
+  const token = after['generationKey'];
+  // Older starts recorded a 16-character prefix of the same SHA-256 key.
+  return (
+    typeof token === 'string' && (token === key || (token.length === 16 && key.startsWith(token)))
+  );
+}
+
+async function enqueueMediaPreparation(
+  tx: Prisma.TransactionClient,
+  videoId: string,
+  scheduleId: string,
+  contentVersion: number,
+) {
+  const eventKey = `prepare:${scheduleId}:${contentVersion}`;
+  await tx.outboxEvent.upsert({
+    where: { eventKey },
+    create: {
+      eventKey,
+      eventType: 'content.generated',
+      payload: { videoId, scheduleId, contentVersion },
+    },
+    update: {},
+  });
 }
 
 export interface ContentClaimInput {
@@ -23,8 +65,15 @@ export async function beginContentGeneration(db: PrismaClient, input: ContentCla
     throw new Error('regenerationRequestId is required for explicit regeneration');
   return db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${input.videoId} FOR UPDATE`;
-    const video = await tx.video.findUniqueOrThrow({ where: { videoId: input.videoId } });
-    if (!video.title || !video.faceId || video.approvalStatus !== 'APPROVED')
+    const video = await tx.video.findUniqueOrThrow({
+      where: { videoId: input.videoId },
+      include: { face: true, thumbnail: true, schedule: true, postingHistory: true },
+    });
+    if (
+      deriveVideoReadiness(video) !== 'READY' ||
+      video.postingHistory ||
+      (video.schedule && !['SELECTED', 'SCHEDULED'].includes(video.schedule.status))
+    )
       throw new Error('Content generation requires approved title, face and video');
     if (
       !['READY', 'SELECTED', 'CONTENT_GENERATING', 'CONTENT_READY', 'SCHEDULED', 'FAILED'].includes(
@@ -33,25 +82,6 @@ export async function beginContentGeneration(db: PrismaClient, input: ContentCla
     )
       throw new Error(`Content generation is not allowed from ${video.workflowStatus}`);
     const provider = input.provider ?? 'unknown';
-    if (!input.regenerate) {
-      const reusable = await tx.content.findFirst({
-        where: {
-          videoId: video.id,
-          provider,
-          modelName: input.modelName,
-          promptVersion: input.promptVersion,
-          titleSnapshot: video.title,
-        },
-        orderBy: { version: 'desc' },
-      });
-      if (reusable)
-        return {
-          reused: true as const,
-          generationKey: reusable.generationKey,
-          video,
-          content: reusable,
-        };
-    }
     const base = [
       video.videoId,
       video.inputVersion,
@@ -64,7 +94,17 @@ export async function beginContentGeneration(db: PrismaClient, input: ContentCla
       input.regenerate ? [...base, 'regenerate', input.regenerationRequestId] : base,
     );
     const existing = await tx.content.findUnique({ where: { generationKey } });
-    if (existing) return { reused: true as const, generationKey, video, content: existing };
+    if (existing) {
+      const schedule = await tx.schedule.findUnique({ where: { videoId: video.id } });
+      if (schedule?.status === 'SELECTED' && video.workflowStatus === 'SELECTED') {
+        await tx.video.update({
+          where: { id: video.id },
+          data: { workflowStatus: 'CONTENT_READY' },
+        });
+        await enqueueMediaPreparation(tx, video.videoId, schedule.id, existing.version);
+      }
+      return { reused: true as const, generationKey, video, content: existing };
+    }
     await tx.video.update({
       where: { id: video.id },
       data: { workflowStatus: 'CONTENT_GENERATING' },
@@ -72,6 +112,7 @@ export async function beginContentGeneration(db: PrismaClient, input: ContentCla
     await tx.auditLog.create({
       data: {
         actorId: input.actorId,
+        createdAt: new Date(),
         action: input.regenerate ? 'CONTENT_REGENERATION_STARTED' : 'CONTENT_GENERATION_STARTED',
         entity: 'Video',
         entityId: video.id,
@@ -79,7 +120,7 @@ export async function beginContentGeneration(db: PrismaClient, input: ContentCla
           promptVersion: input.promptVersion,
           provider,
           modelName: input.modelName,
-          generationKey: generationKey.slice(0, 16),
+          generationKey,
         },
       },
     });
@@ -106,6 +147,12 @@ export async function completeContentGeneration(
     const video = await tx.video.findUniqueOrThrow({ where: { videoId: input.videoId } });
     const existing = await tx.content.findUnique({ where: { generationKey: input.generationKey } });
     if (existing) return existing;
+    if (
+      video.workflowStatus !== 'CONTENT_GENERATING' ||
+      video.approvalStatus !== 'APPROVED' ||
+      !(await isCurrentGeneration(tx, video.id, input.generationKey))
+    )
+      throw new Error('Content generation is no longer active');
     const latest = await tx.content.aggregate({
       where: { videoId: video.id },
       _max: { version: true },
@@ -128,20 +175,7 @@ export async function completeContentGeneration(
     });
     await tx.video.update({ where: { id: video.id }, data: { workflowStatus: 'CONTENT_READY' } });
     const schedule = await tx.schedule.findUnique({ where: { videoId: video.id } });
-    if (schedule)
-      await tx.outboxEvent.upsert({
-        where: { eventKey: `prepare:${schedule.id}:${content.version}` },
-        create: {
-          eventKey: `prepare:${schedule.id}:${content.version}`,
-          eventType: 'content.generated',
-          payload: {
-            videoId: video.videoId,
-            scheduleId: schedule.id,
-            contentVersion: content.version,
-          },
-        },
-        update: {},
-      });
+    if (schedule) await enqueueMediaPreparation(tx, video.videoId, schedule.id, content.version);
     await tx.auditLog.create({
       data: {
         actorId: input.actorId,
@@ -169,6 +203,7 @@ export async function recordContentGenerationFailure(
     errorCode: string;
     retryable: boolean;
     classification: string;
+    generationKey?: string;
     providerStatus?: number;
     providerType?: string;
     providerCode?: string;
@@ -177,6 +212,7 @@ export async function recordContentGenerationFailure(
   },
 ): Promise<void> {
   await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${input.videoId} FOR UPDATE`;
     const video = await tx.video.findUniqueOrThrow({
       where: { videoId: input.videoId },
       include: {
@@ -184,7 +220,18 @@ export async function recordContentGenerationFailure(
         schedule: { select: { status: true } },
       },
     });
-    const recoveryStatus = video.content[0]
+    if (
+      video.workflowStatus !== 'CONTENT_GENERATING' ||
+      (input.generationKey && !(await isCurrentGeneration(tx, video.id, input.generationKey)))
+    )
+      return;
+    const latest = video.content[0];
+    const usableContent =
+      latest &&
+      latest.titleSnapshot === video.title &&
+      video.readyAt &&
+      latest.createdAt >= video.readyAt;
+    const recoveryStatus = usableContent
       ? video.schedule?.status === 'SCHEDULED'
         ? 'SCHEDULED'
         : 'CONTENT_READY'
@@ -222,6 +269,7 @@ export async function recordContentGenerationFailure(
 
 export async function markContentScheduled(db: PrismaClient, videoId: string, actorId: string) {
   return db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${videoId} FOR UPDATE`;
     const video = await tx.video.findUniqueOrThrow({
       where: { videoId },
       include: { schedule: true, content: { orderBy: { version: 'desc' }, take: 1 } },
@@ -230,7 +278,14 @@ export async function markContentScheduled(db: PrismaClient, videoId: string, ac
       throw new Error('Schedule and generated content are required');
     if (!['CONTENT_READY', 'SCHEDULED'].includes(video.workflowStatus))
       throw new Error(`Cannot schedule content from ${video.workflowStatus}`);
-    await tx.schedule.update({ where: { id: video.schedule.id }, data: { status: 'SCHEDULED' } });
+    if (video.workflowStatus === 'SCHEDULED' && video.schedule.status === 'SCHEDULED')
+      return video.schedule;
+    if (!['SELECTED', 'SCHEDULED'].includes(video.schedule.status))
+      throw new Error('Schedule is no longer awaiting content');
+    const schedule = await tx.schedule.update({
+      where: { id: video.schedule.id },
+      data: { status: 'SCHEDULED' },
+    });
     await tx.video.update({ where: { id: video.id }, data: { workflowStatus: 'SCHEDULED' } });
     await tx.auditLog.create({
       data: {
@@ -241,6 +296,6 @@ export async function markContentScheduled(db: PrismaClient, videoId: string, ac
         after: { videoId, jobId: video.schedule.jobId },
       },
     });
-    return video.schedule;
+    return schedule;
   });
 }

@@ -73,6 +73,22 @@ describe.skipIf(!testDatabaseUrl)('Phase 3 content and media persistence', () =>
       actorId: 'test',
     });
     expect(first.reused).toBe(false);
+    await expect(
+      completeContentGeneration(client, {
+        videoId,
+        generationKey: 'obsolete-attempt',
+        promptVersion: 'v1',
+        provider: 'fake',
+        modelName: 'fake-model',
+        actorId: 'test',
+        result: {
+          caption: 'Obsolete caption',
+          hashtags: ['#Test'],
+          cta: 'Read more',
+          model: 'fake-model',
+        },
+      }),
+    ).rejects.toThrow('no longer active');
     await completeContentGeneration(client, {
       videoId,
       generationKey: first.generationKey,

@@ -217,10 +217,12 @@ async function driveAssets(
     where: { source_accountKey: { source: 'GOOGLE_DRIVE_CHANGES', accountKey } },
   });
   if (!saved) {
-    const [videos, thumbnails, cursor] = await Promise.all([
+    // Capture the change-feed position before listing so changes during the
+    // inventory cannot be lost between the snapshot and cursor acquisition.
+    const cursor = await drive.getStartPageToken();
+    const [videos, thumbnails] = await Promise.all([
       drive.listVideoAssets(config.videoFolderId),
       drive.listFolderFiles(config.thumbnailFolderId),
-      drive.getStartPageToken(),
     ]);
     return { videos, thumbnails, cursor };
   }
@@ -396,6 +398,7 @@ export async function runGoogleSync(
         videoId: video.videoId,
         videoLink: driveLink(video.driveFileId),
         thumbnailLink: driveLink(video.thumbnail?.driveFileId ?? null),
+        approvalStatus: video.approvalStatus,
         status: mirror.workflowStatus,
         selectedDate: video.schedule?.businessDate ?? '',
         scheduledDate: video.schedule?.businessDate ?? '',

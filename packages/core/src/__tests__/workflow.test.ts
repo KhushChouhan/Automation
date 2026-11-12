@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  acceptsWorkflowInput,
   approvalCommandSchema,
+  hasSeparateThumbnail,
   assertTransition,
   businessDateOf,
   calendarDayDistance,
@@ -9,6 +11,7 @@ import {
   formatVideoId,
   isFaceEligible,
   pickEligibleVideos,
+  planReadySlots,
   slotInstant,
   titleSchema,
 } from '../index.js';
@@ -69,6 +72,22 @@ describe('workflow validation and approval', () => {
     expect(titleSchema.safeParse('valid title').success).toBe(true);
   });
 
+  it('requires an independent thumbnail and locks in-flight and terminal states against edits', () => {
+    expect(hasSeparateThumbnail('video', 'video')).toBe(false);
+    expect(hasSeparateThumbnail('video', null)).toBe(false);
+    expect(hasSeparateThumbnail('video', 'cover')).toBe(true);
+    for (const status of [
+      'SELECTED',
+      'CONTENT_GENERATING',
+      'SCHEDULED',
+      'PUBLISHING',
+      'POSTED',
+      'FAILED',
+      'RECONCILE_REQUIRED',
+    ] as const)
+      expect(acceptsWorkflowInput(status)).toBe(false);
+  });
+
   it('requires a human actor and requires a reason for nonapproval decisions', () => {
     expect(
       approvalCommandSchema.safeParse({ decision: 'APPROVED', actorId: 'approver-1' }).success,
@@ -120,11 +139,61 @@ describe('face rotation and selection policy', () => {
     },
   );
 
+  it.each([1, 4, 10, 50])(
+    'places a %i-video backlog in future slots, continuing over daily boundaries',
+    (size) => {
+      const candidates = Array.from({ length: size }, (_, i) =>
+        videoFixture({
+          id: String(i),
+          videoId: `GCS-${String(i + 1).padStart(4, '0')}`,
+          faceId: `face-${i % 4}`,
+          readyAt: new Date(i),
+        }),
+      );
+      const now = slotInstant('2026-10-27', 19);
+      const reservations = planReadySlots(candidates, [], [], '2026-10-27', 30, now);
+      expect(reservations).toHaveLength(size);
+      expect(reservations[0]?.slotHour).toBe(20);
+      expect(reservations.map((row) => row.candidate.id)).toEqual(candidates.map((row) => row.id));
+      const first = planReadySlots(candidates, [], [], '2026-10-27', 1, now);
+      const committed = first.map((row) => ({
+        ...row,
+        faceId: row.candidate.faceId,
+        videoId: row.candidate.id,
+      }));
+      const remaining = candidates.filter(
+        (item) => !committed.some((row) => row.videoId === item.id),
+      );
+      expect(planReadySlots(remaining, committed, [], '2026-10-27', 1, now)).toEqual([]);
+      const next = planReadySlots(remaining, committed, [], '2026-10-28', 29, now);
+      expect([...first, ...next]).toEqual(reservations);
+    },
+  );
+
+  it('counts off-date successful posts against daily capacity and avoids reserving adjacent faces', () => {
+    const candidates = [
+      videoFixture({ id: 'oldest', faceId: 'a' }),
+      videoFixture({ id: 'next', faceId: 'b' }),
+    ];
+    const now = new Date('2026-10-27T00:00:00Z');
+    const planned = planReadySlots(
+      candidates,
+      [{ videoId: 'scheduled', faceId: 'a', slotHour: 19, businessDate: '2026-10-28' }],
+      [{ videoId: 'posted', faceId: 'c', businessDate: '2026-10-27' }],
+      '2026-10-27',
+      1,
+      now,
+    );
+    expect(planned.map((row) => row.candidate.id)).toEqual(['next']);
+  });
+
   it('blocks the posting date and one following local calendar date', () => {
     expect(isFaceEligible('2026-10-27', '2026-10-27', 2)).toBe(false);
     expect(isFaceEligible('2026-10-27', '2026-10-28', 2)).toBe(false);
     expect(isFaceEligible('2026-10-27', '2026-10-29', 2)).toBe(true);
     expect(calendarDayDistance('2026-10-27', '2026-10-29')).toBe(2);
+    expect(isFaceEligible('2026-10-29', '2026-10-27', 2)).toBe(true);
+    expect(isFaceEligible('2026-10-28', '2026-10-27', 2)).toBe(false);
   });
 
   it('selects no more than two distinct faces and respects capacity', () => {

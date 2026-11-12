@@ -38,5 +38,5 @@ export function isFaceEligible(
   if (!Number.isInteger(gapDays) || gapDays < 1)
     throw new Error('gapDays must be a positive integer');
   if (!lastDate) return true;
-  return calendarDayDistance(lastDate, targetDate) >= gapDays;
+  return Math.abs(calendarDayDistance(lastDate, targetDate)) >= gapDays;
 }

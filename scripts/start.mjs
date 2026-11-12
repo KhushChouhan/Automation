@@ -1,97 +1,82 @@
 import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
-console.log('[PROD] Starting Instagram Reels Automation (Unified Engine)...');
-
-// Global error handlers so crashes are never silent
-process.on('uncaughtException', (err) => {
-  console.error('[PROD uncaughtException]:', err);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('[PROD unhandledRejection]:', reason);
-});
-
-// 1. Embedded Redis startup if localhost, empty, or default
-const rawRedisUrl = (process.env['REDIS_URL'] ?? '').trim();
-const isLocalRedis =
-  !rawRedisUrl ||
-  rawRedisUrl.includes('127.0.0.1') ||
-  rawRedisUrl.includes('localhost') ||
-  rawRedisUrl === 'redis://127.0.0.1:6379';
-
-if (isLocalRedis) {
-  process.env['REDIS_URL'] = 'redis://127.0.0.1:6379';
-  console.log('[PROD] Launching embedded Redis server for queue processing...');
+/** Validate without opening connections, starting Redis, or changing database state. */
+export function startupCommand(env, role = env.PROCESS_ROLE ?? 'api') {
+  if (!['api', 'worker', 'migrate'].includes(role))
+    throw new Error('PROCESS_ROLE must be api, worker, or migrate');
+  let database;
   try {
-    const redisProc = spawn('redis-server', ['--daemonize', 'yes', '--protected-mode', 'no', '--port', '6379'], {
-      stdio: 'inherit',
+    database = new URL(env.DATABASE_URL ?? '');
+  } catch {
+    throw new Error('DATABASE_URL must be an explicit PostgreSQL URL');
+  }
+  if (!['postgres:', 'postgresql:'].includes(database.protocol))
+    throw new Error('DATABASE_URL must use PostgreSQL');
+
+  if (role === 'migrate')
+    return [
+      'node_modules/prisma/build/index.js',
+      'migrate',
+      'deploy',
+      '--schema',
+      'prisma/schema.prisma',
+    ];
+
+  let redis;
+  try {
+    redis = new URL(env.REDIS_URL ?? '');
+  } catch {
+    throw new Error('REDIS_URL must explicitly identify the shared Redis service');
+  }
+  if (!['redis:', 'rediss:'].includes(redis.protocol))
+    throw new Error('REDIS_URL must use redis or rediss');
+  if (
+    env.NODE_ENV === 'production' &&
+    ['localhost', '127.0.0.1', '[::1]', '::1', '0.0.0.0'].includes(redis.hostname.toLowerCase())
+  )
+    throw new Error('Production requires a shared Redis service, not loopback Redis');
+  return [`apps/${role}/dist/main.js`];
+}
+
+/** One supervised runtime per container. A failed migration or runtime fails the container. */
+export async function start(
+  env = process.env,
+  role = process.argv[2] ?? env.PROCESS_ROLE ?? 'api',
+  spawnProcess = spawn,
+) {
+  const args = startupCommand(env, role);
+  const revision =
+    env.APP_REVISION ?? env.RENDER_GIT_COMMIT ?? env.RAILWAY_GIT_COMMIT_SHA ?? 'unknown';
+  console.log(
+    JSON.stringify({
+      operation: 'runtime.start',
+      role,
+      revision: /^[a-zA-Z0-9._-]{1,128}$/.test(revision) ? revision : 'unknown',
+    }),
+  );
+  const child = spawnProcess(process.execPath, args, { stdio: 'inherit', env });
+  const forward = (signal) => child.kill(signal);
+  const onTerm = () => forward('SIGTERM');
+  const onInt = () => forward('SIGINT');
+  process.once('SIGTERM', onTerm);
+  process.once('SIGINT', onInt);
+  try {
+    return await new Promise((resolve, reject) => {
+      child.once('error', () => reject(new Error('Runtime subprocess could not start')));
+      child.once('exit', (code, signal) => resolve(code ?? (signal === 'SIGINT' ? 130 : 1)));
     });
-    redisProc.on('error', (err) => {
-      console.warn('[PROD] Note: Could not spawn embedded redis-server:', err.message);
-    });
-    // Give redis-server 1 second to bind port 6379
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    console.log('[PROD] Embedded Redis server started.');
-  } catch (err) {
-    console.warn('[PROD] Note on embedded redis:', err);
+  } finally {
+    process.off('SIGTERM', onTerm);
+    process.off('SIGINT', onInt);
   }
 }
 
-// 2. Sync PostgreSQL database schema using Prisma db push
-if (process.env['DATABASE_URL']) {
-  console.log('[PROD] Connecting to PostgreSQL and synchronizing database schema...');
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      await new Promise((resolve, reject) => {
-        const proc = spawn(
-          'node',
-          ['node_modules/prisma/build/index.js', 'db', 'push', '--schema', 'prisma/schema.prisma', '--skip-generate'],
-          { stdio: 'inherit' },
-        );
-        proc.on('close', (code) => {
-          if (code === 0) resolve(undefined);
-          else reject(new Error(`Prisma schema sync exited with code ${code}`));
-        });
-      });
-      console.log('[PROD] Database schema synchronized successfully.');
-      break;
-    } catch (err) {
-      console.warn(
-        `[PROD] Schema sync attempt ${attempt}/5: ${err instanceof Error ? err.message : String(err)}. Retrying in 2s...`,
-      );
-      if (attempt === 5) {
-        console.error('[PROD] Database schema sync could not complete. Continuing service launch...');
-      } else {
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-    }
-  }
-
-  // Self-heal stale sync conflicts from previous failed syncs
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const { PrismaClient } = await import('@prisma/client');
-    const healDb = new PrismaClient();
-    const healed = await healDb.syncConflict.updateMany({
-      where: { resolvedAt: null, reason: { in: ['UNRESOLVED_CONFLICT', 'UNKNOWN_OR_INACTIVE_FACE'] } },
-      data: { resolvedAt: new Date() },
-    });
-    if (healed.count > 0) {
-      console.log(`[PROD] Self-healed ${healed.count} legacy sync conflict records.`);
-    }
-    await healDb.$disconnect();
-  } catch (err) {
-    console.warn('[PROD] Conflict heal notice:', err instanceof Error ? err.message : String(err));
+    process.exitCode = await start();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'Runtime startup failed');
+    process.exitCode = 1;
   }
-}
-
-// 3. Start Fastify API and Worker concurrently
-console.log('[PROD] Initializing Fastify API and Background Automation Worker...');
-try {
-  await Promise.all([
-    import('../apps/api/dist/main.js'),
-    import('../apps/worker/dist/main.js'),
-  ]);
-  console.log('[PROD] Unified Engine is running.');
-} catch (error) {
-  console.error('[PROD] Fatal error starting services:', error);
-  process.exit(1);
 }

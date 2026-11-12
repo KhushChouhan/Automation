@@ -1,10 +1,11 @@
-import { approvalCommandSchema, deriveWorkflowStatus } from '@gcs/core';
+import { acceptsWorkflowInput, approvalCommandSchema, deriveVideoReadiness } from '@gcs/core';
 import type { Prisma, PrismaClient } from '@prisma/client';
 
 export interface ApprovalCommand {
   decision: 'APPROVED' | 'REJECTED' | 'CHANGES_REQUIRED';
   actorId: string;
   reason?: string | undefined;
+  expectedInputVersion?: number | undefined;
 }
 
 /** A human decision and its audit trail commit together. */
@@ -24,30 +25,39 @@ export async function decideApprovalInTransaction(
     where: { videoId },
     include: { face: true, thumbnail: true, schedule: true, postingHistory: true },
   });
-  if (
-    video.schedule ||
-    video.postingHistory ||
-    (!video.workflowStatus.startsWith('WAITING_') && video.workflowStatus !== 'READY')
-  ) {
+  if (video.schedule || video.postingHistory || !acceptsWorkflowInput(video.workflowStatus)) {
     throw new Error('Approval cannot change after selection or posting');
   }
   if (input.decision === 'APPROVED') {
-    const status = deriveWorkflowStatus({
-      hasVideo: Boolean(video.driveFileId),
-      faceId: video.face?.active ? video.faceId : null,
-      title: video.title,
-      hasThumbnail: Boolean(video.thumbnail),
-      approvalStatus: 'APPROVED',
-    });
+    const status = deriveVideoReadiness({ ...video, approvalStatus: 'APPROVED' });
     if (status !== 'READY') throw new Error(`Cannot approve incomplete video: ${status}`);
   }
+  if (
+    video.approvalStatus === input.decision &&
+    (input.expectedInputVersion === undefined ||
+      input.expectedInputVersion === video.inputVersion ||
+      input.expectedInputVersion === video.inputVersion - 1)
+  ) {
+    const previous = await tx.approvalEvent.findFirst({
+      where: { videoId: video.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (
+      previous?.decision === input.decision &&
+      previous.actorId === input.actorId &&
+      previous.reason === (input.reason ?? null)
+    )
+      return { video, event: previous };
+  }
+  if (input.expectedInputVersion !== undefined && input.expectedInputVersion !== video.inputVersion)
+    throw Object.assign(new Error('STALE_INPUT'), { code: 'STALE_INPUT' });
   const nextStatus = input.decision === 'APPROVED' ? 'READY' : 'WAITING_APPROVAL';
   const after = await tx.video.update({
     where: { id: video.id },
     data: {
       approvalStatus: input.decision,
       workflowStatus: nextStatus,
-      readyAt: input.decision === 'APPROVED' ? new Date() : null,
+      readyAt: input.decision === 'APPROVED' ? (video.readyAt ?? new Date()) : null,
       inputVersion: { increment: 1 },
     },
   });

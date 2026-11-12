@@ -1,4 +1,11 @@
-import { deriveWorkflowStatus, formatVideoId, titleSchema } from '@gcs/core';
+import {
+  acceptsWorkflowInput,
+  deriveWorkflowStatus,
+  faceNameSchema,
+  formatVideoId,
+  hasSeparateThumbnail,
+  titleSchema,
+} from '@gcs/core';
 import { Prisma, type PrismaClient } from '@prisma/client';
 
 type Transaction = Prisma.TransactionClient;
@@ -53,41 +60,47 @@ export async function discoverVideo(db: PrismaClient, input: DiscoverVideoInput)
   const existing = await db.video.findUnique({ where: { driveFileId } });
   if (existing) return existing;
   try {
-    return await db.$transaction(async (tx) => {
-      const videoId = await allocateVideoId(tx);
-      const video = await tx.video.create({
-        data: {
-          videoId,
-          driveFileId,
-          sourceName: input.sourceName ?? null,
-          sourceMimeType: input.sourceMimeType ?? null,
-          sourceChecksum: input.sourceChecksum ?? null,
-          sourceSizeBytes: sourceSizeBytes ?? null,
-          sourceCreatedTime: sourceCreatedTime ?? null,
-          sourceModifiedTime: sourceModifiedTime ?? null,
-          workflowStatus: 'WAITING_FACE',
-        },
-      });
-      await tx.auditLog.createMany({
-        data: [
-          {
-            actorId: 'google-drive-sync',
-            action: 'VIDEO_ID_ASSIGNED',
-            entity: 'Video',
-            entityId: video.id,
-            after: { videoId },
+    return await db.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(5271, hashtext(${driveFileId}))`;
+        const raced = await tx.video.findUnique({ where: { driveFileId } });
+        if (raced) return raced;
+        const videoId = await allocateVideoId(tx);
+        const video = await tx.video.create({
+          data: {
+            videoId,
+            driveFileId,
+            sourceName: input.sourceName ?? null,
+            sourceMimeType: input.sourceMimeType ?? null,
+            sourceChecksum: input.sourceChecksum ?? null,
+            sourceSizeBytes: sourceSizeBytes ?? null,
+            sourceCreatedTime: sourceCreatedTime ?? null,
+            sourceModifiedTime: sourceModifiedTime ?? null,
+            workflowStatus: 'WAITING_FACE',
           },
-          {
-            actorId: 'google-drive-sync',
-            action: 'VIDEO_DISCOVERED',
-            entity: 'Video',
-            entityId: video.id,
-            after: { videoId, driveFileId },
-          },
-        ],
-      });
-      return video;
-    });
+        });
+        await tx.auditLog.createMany({
+          data: [
+            {
+              actorId: 'google-drive-sync',
+              action: 'VIDEO_ID_ASSIGNED',
+              entity: 'Video',
+              entityId: video.id,
+              after: { videoId },
+            },
+            {
+              actorId: 'google-drive-sync',
+              action: 'VIDEO_DISCOVERED',
+              entity: 'Video',
+              entityId: video.id,
+              after: { videoId, driveFileId },
+            },
+          ],
+        });
+        return video;
+      },
+      { maxWait: 10_000, timeout: 15_000 },
+    );
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const raced = await db.video.findUnique({ where: { driveFileId } });
@@ -119,15 +132,16 @@ export async function setVideoTitleInTransaction(
   await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${videoId} FOR UPDATE`;
   const before = await tx.video.findUniqueOrThrow({
     where: { videoId },
-    include: { thumbnail: true, schedule: true },
+    include: { face: true, thumbnail: true, schedule: true, postingHistory: true },
   });
-  if (before.workflowStatus === 'POSTED' || before.schedule)
+  if (!acceptsWorkflowInput(before.workflowStatus) || before.schedule || before.postingHistory)
     throw new Error('A selected or posted video title cannot be changed');
+  if (before.title === validTitle) return before;
   const workflowStatus = deriveWorkflowStatus({
     hasVideo: Boolean(before.driveFileId),
-    faceId: before.faceId,
+    faceId: before.face?.active ? before.faceId : null,
     title: validTitle,
-    hasThumbnail: Boolean(before.thumbnail),
+    hasThumbnail: hasSeparateThumbnail(before.driveFileId, before.thumbnail?.driveFileId),
     approvalStatus: 'PENDING',
   });
   const after = await tx.video.update({
@@ -163,6 +177,20 @@ export async function assignFace(
   return db.$transaction((tx) => assignFaceInTransaction(tx, videoId, faceId, actorId));
 }
 
+/** Serialize name-based creation so case variants of one face cannot bypass rotation. */
+export async function findFaceForInput(tx: Transaction, input: string) {
+  const name = faceNameSchema.parse(input);
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(5272, hashtext(lower(${name})))`;
+  const byId = await tx.face.findUnique({ where: { id: name } });
+  if (byId) return byId;
+  const matches = await tx.face.findMany({
+    where: { name: { equals: name, mode: 'insensitive' } },
+    take: 2,
+  });
+  if (matches.length > 1) throw new Error('AMBIGUOUS_FACE_NAME');
+  return matches[0];
+}
+
 export async function assignFaceInTransaction(
   tx: Transaction,
   videoId: string,
@@ -173,21 +201,19 @@ export async function assignFaceInTransaction(
   await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${videoId} FOR UPDATE`;
   const before = await tx.video.findUniqueOrThrow({
     where: { videoId },
-    include: { thumbnail: true, schedule: true },
+    include: { face: true, thumbnail: true, schedule: true, postingHistory: true },
   });
-  if (before.schedule || before.workflowStatus === 'POSTED')
+  if (!acceptsWorkflowInput(before.workflowStatus) || before.schedule || before.postingHistory)
     throw new Error('A selected or posted video face cannot be changed');
-  const face =
-    (await tx.face.findUnique({ where: { id: faceId } })) ??
-    (await tx.face.findUnique({ where: { name: faceId } })) ??
-    (await tx.face.create({ data: { name: faceId, active: true } }));
+  const name = faceNameSchema.parse(faceId);
+  const face = (await findFaceForInput(tx, name)) ?? (await tx.face.create({ data: { name } }));
   if (!face.active) throw new Error('Inactive face cannot be assigned');
   if (before.faceId === face.id) return before;
   const workflowStatus = deriveWorkflowStatus({
     hasVideo: Boolean(before.driveFileId),
     faceId: face.id,
     title: before.title,
-    hasThumbnail: Boolean(before.thumbnail),
+    hasThumbnail: hasSeparateThumbnail(before.driveFileId, before.thumbnail?.driveFileId),
     approvalStatus: 'PENDING',
   });
   const after = await tx.video.update({
@@ -230,25 +256,41 @@ export async function attachThumbnailInTransaction(
   videoId: string,
   driveFileId: string,
   actorId: string,
+  metadata?: { checksum?: string | undefined; mimeType?: string | undefined },
 ) {
   if (!driveFileId.trim() || !actorId.trim())
     throw new Error('driveFileId and actorId are required');
   await tx.$queryRaw`SELECT "id" FROM "Video" WHERE "videoId" = ${videoId} FOR UPDATE`;
   const before = await tx.video.findUniqueOrThrow({
     where: { videoId },
-    include: { thumbnail: true, schedule: true },
+    include: { face: true, thumbnail: true, schedule: true, postingHistory: true },
   });
-  if (before.schedule || before.workflowStatus === 'POSTED')
+  if (!acceptsWorkflowInput(before.workflowStatus) || before.schedule || before.postingHistory)
     throw new Error('A selected or posted video thumbnail cannot be changed');
-  if (before.thumbnail?.driveFileId === driveFileId) return before;
+  driveFileId = driveFileId.trim();
+  if (!hasSeparateThumbnail(before.driveFileId, driveFileId))
+    throw new Error('Thumbnail must be a separate asset from the source video');
+  const sameFile = before.thumbnail?.driveFileId === driveFileId;
+  if (sameFile && (!metadata?.checksum || before.thumbnail?.checksum === metadata.checksum))
+    return before;
   await tx.thumbnail.upsert({
     where: { videoId: before.id },
-    create: { videoId: before.id, driveFileId },
-    update: { driveFileId },
+    create: {
+      videoId: before.id,
+      driveFileId,
+      checksum: metadata?.checksum ?? null,
+      mimeType: metadata?.mimeType ?? null,
+    },
+    update: {
+      driveFileId,
+      checksum: metadata?.checksum ?? null,
+      mimeType: metadata?.mimeType ?? (sameFile ? before.thumbnail?.mimeType : null) ?? null,
+      storageKey: null,
+    },
   });
   const workflowStatus = deriveWorkflowStatus({
     hasVideo: Boolean(before.driveFileId),
-    faceId: before.faceId,
+    faceId: before.face?.active ? before.faceId : null,
     title: before.title,
     hasThumbnail: true,
     approvalStatus: 'PENDING',
@@ -265,7 +307,7 @@ export async function attachThumbnailInTransaction(
   await tx.auditLog.create({
     data: {
       actorId,
-      action: 'VIDEO_THUMBNAIL_ATTACHED',
+      action: sameFile ? 'VIDEO_THUMBNAIL_REVISED' : 'VIDEO_THUMBNAIL_ATTACHED',
       entity: 'Video',
       entityId: before.id,
       before: { driveFileId: before.thumbnail?.driveFileId ?? null },

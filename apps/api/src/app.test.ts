@@ -24,7 +24,14 @@ function dependencies(overrides: Record<string, unknown> = {}) {
       findUnique: ({ where }: { where: { videoId?: string } }) =>
         Promise.resolve(
           where.videoId
-            ? { id: 'video-db-id', inputVersion: 1, schedule: { id: 'schedule-db-id' } }
+            ? {
+                id: 'video-db-id',
+                inputVersion: 1,
+                approvalStatus: 'APPROVED',
+                workflowStatus: 'SCHEDULED',
+                content: [{ id: 'content-db-id' }],
+                schedule: { id: 'schedule-db-id', mediaAsset: { status: 'FAILED' } },
+              }
             : null,
         ),
       findMany: () => Promise.resolve([]),
@@ -74,7 +81,7 @@ describe('operations API', () => {
     const app = await buildApp(dependencies());
     const response = await app.inject({ method: 'GET', url: '/health' });
     expect(response.statusCode, response.body).toBe(200);
-    expect(response.json()).toEqual({ status: 'ok', service: 'api' });
+    expect(response.json()).toEqual({ status: 'ok', service: 'api', revision: null });
     expect(response.headers['x-content-type-options']).toBe('nosniff');
     await app.close();
   });
@@ -404,7 +411,27 @@ describe('operations API', () => {
   });
 
   it('queues local-admin content and media controls and audits the request', async () => {
-    const app = await buildApp(dependencies());
+    const jobIds: string[] = [];
+    const actionQueue = {
+      add: (_name: string, _data: Record<string, unknown>, options?: Record<string, unknown>) => {
+        const requestedJobId = options?.['jobId'];
+        const id = typeof requestedJobId === 'string' ? requestedJobId : 'missing-job-id';
+        jobIds.push(id);
+        return Promise.resolve({ id });
+      },
+      getJobCounts: () => Promise.resolve({}),
+      getJobs: () => Promise.resolve([]),
+      getJobSchedulers: () => Promise.resolve([]),
+      close: () => Promise.resolve(),
+    };
+    const app = await buildApp(
+      dependencies({
+        phaseQueues: {
+          'generate-content': actionQueue,
+          'prepare-media': actionQueue,
+        },
+      }),
+    );
     for (const url of [
       '/api/v1/videos/GCS-0021/content/generate',
       '/api/v1/videos/GCS-0021/content/regenerate',
@@ -416,6 +443,16 @@ describe('operations API', () => {
       expect(response.statusCode, response.body).toBe(202);
       expect(response.json()).toMatchObject({ queued: true });
     }
+    const secondRetry = await app.inject({
+      method: 'POST',
+      url: '/api/v1/videos/GCS-0021/content/retry',
+    });
+    expect(secondRetry.statusCode, secondRetry.body).toBe(202);
+    const retryIds = jobIds.filter((id) => id.startsWith('retry-content-GCS-0021-'));
+    expect(retryIds).toHaveLength(2);
+    expect(new Set(retryIds).size).toBe(2);
+    expect(jobIds).toContain('generate-GCS-0021-v1');
+    expect(jobIds).toContain('prepare-schedule-db-id');
     const invalid = await app.inject({
       method: 'POST',
       url: '/api/v1/videos/not-a-video/content/generate',
