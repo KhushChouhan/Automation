@@ -3,6 +3,7 @@ export function dashboardAuthenticated(
   env: Record<string, string | undefined>,
 ): boolean {
   const password = env['DASHBOARD_PASSWORD'];
+  // Keep dashboard credentials server-only; production access requires the configured password.
   const username = env['DASHBOARD_USERNAME'] || 'admin';
   if (!password || !authorization?.startsWith('Basic ')) return false;
   let supplied: string;
